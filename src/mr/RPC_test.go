@@ -1,5 +1,7 @@
 package mr
 
+// 用于学习和测试 RPC 和 testing 功能，没有正式作用
+
 import (
 	"fmt"
 	"testing"
