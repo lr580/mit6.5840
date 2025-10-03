@@ -7,9 +7,6 @@ package main
 //
 
 import (
-	"io/ioutil"
-	"log"
-	"os"
 	"strconv"
 	"strings"
 	"unicode"
@@ -43,17 +40,4 @@ func Map(filename string, contents string) []mr.KeyValue {
 func Reduce(key string, values []string) string {
 	// return the number of occurrences of this word.
 	return strconv.Itoa(len(values))
-}
-
-func ReadFile(filename string) string {
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("cannot open %v", filename)
-	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-	}
-	file.Close()
-	return string(content)
 }

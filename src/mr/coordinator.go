@@ -33,6 +33,13 @@ type task struct {
 	t task
 }*/
 
+const (
+	MAPPING uint8 = iota
+	REDUCING
+	FINISHED
+	WAITING // 给worker返回值用，也可以复用 finished 但语义不清晰
+) // coordinator 状态
+
 type Coordinator struct {
 	// Your definitions here.
 	filenames   []string
@@ -40,14 +47,16 @@ type Coordinator struct {
 	mapTasks    []task
 	reduceTasks []task
 	mutexTask   sync.Mutex
-	isReducing  bool // 是否两个状态不足，reduce 执行完后还要写总结果
+	status      uint8 //多个状态方便扩展
+	// isReducing  bool // 是否两个状态不足，reduce 执行完后还要写总结果
+
 }
 
 func (c *Coordinator) currentTasks() (tasks *[]task) {
-	if c.isReducing {
-		tasks = &c.reduceTasks
-	} else {
+	if c.status == MAPPING {
 		tasks = &c.mapTasks
+	} else { // else if?
+		tasks = &c.reduceTasks
 	}
 	return
 }
@@ -79,40 +88,50 @@ func (c *Coordinator) deadWorkerChecker() {
 }
 
 type AllocatedTask struct {
-	isMapTask bool
-	taskId    int    // 0-indexed
-	filepath  string // optional for map task
+	// isMapTask bool // 方便应对其他状况，换用其他：暂时没有任务(mapping, 但未 reducing；或都在reducing但还没做完，但可能还需要worker)
+	TaskType uint8
+	TaskId   int    // 0-indexed
+	Filepath string // optional for map task
+	NReduce  int    //map需要
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) Allocate(_ *struct{}, reply *AllocatedTask) error {
 	c.mutexTask.Lock()
+	defer c.mutexTask.Unlock()
+	if c.status == FINISHED { // 区分需要等待(如reduce还没开始都在map)
+		return errors.New("任务已完成，请退出")
+	}
 	tasks := c.currentTasks()
 	// 认为 tasks 少(<1e4)，简单起见直接遍历；如果任务多，可以额外维护 bitset 或 map (未完成 tasks 集) 等。
 	for i := range *tasks {
 		if (*tasks)[i].status == IDLE {
 			(*tasks)[i].status = RUNNING
 			(*tasks)[i].startTime = time.Now()
-			reply.taskId = i
-			reply.isMapTask = !c.isReducing
-			if !c.isReducing {
-				reply.filepath = c.filenames[i]
+			reply.TaskId = i
+			reply.TaskType = c.status
+			if c.status == MAPPING {
+				reply.Filepath = c.filenames[i]
+				reply.NReduce = c.nReduce
 			}
-			break
+			return nil
 		}
 	}
-	c.mutexTask.Unlock()
+	reply.TaskType = WAITING
 	return nil
 }
 
 type ReportedTask struct {
-	isMapTask bool
-	taskId    int //0-indexed
+	// isMapTask bool (同理，方便扩展报告其他状态，如出错?)
+	TaskType uint8
+	TaskId   int  //0-indexed
+	IsDone   bool //可能出错，不出错就执行完毕，否则失败，为了鲁棒性
 }
 
 func (c *Coordinator) Report(args *ReportedTask, _ *struct{}) error {
 	c.mutexTask.Lock()
-	if c.isReducing != !args.isMapTask {
+	defer c.mutexTask.Unlock()
+	if args.TaskType != c.status {
 		return errors.New("当前任务已完成：当前阶段与报告阶段不一致")
 	}
 	// 不考虑下面的情况：当前 map-reduce 任务已经完成
@@ -123,17 +142,26 @@ func (c *Coordinator) Report(args *ReportedTask, _ *struct{}) error {
 	// 与此同时，id 应该增加到所有文件名字里，如 mr-id-X-Y。但是 Lab1 并未做此要求
 
 	tasks := c.currentTasks()
-	if (*tasks)[args.taskId].status != RUNNING {
+	if (*tasks)[args.TaskId].status != RUNNING {
 		return errors.New("当前任务不在运行中")
+	}
+	if args.IsDone {
+		(*tasks)[args.TaskId].status = COMPLETED
+	} else { // 简单起见，再分配给任意 worker 做
+		(*tasks)[args.TaskId].status = IDLE
 	}
 
 	// 同理，认为 tasks 少(<1e4)，简单起见直接遍历
-	if isAllCompleted(*tasks) && !c.isReducing {
-		c.isReducing = true
+	if isAllCompleted(*tasks) {
+		switch c.status {
+		case MAPPING:
+			c.status = REDUCING
+		case REDUCING:
+			c.status = FINISHED
+		}
 	}
 	// 当所有 reduce task 执行完毕，什么都不需要做。Done 会收拾结果 (感觉主动通知会更好？)
 	// 无需合并多个 reduce 任务结果，test-mr.sh 会排序合并多个 mr-out-X 与顺序执行对比
-	c.mutexTask.Unlock()
 	return nil
 }
 
@@ -177,7 +205,8 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{filenames: files, nReduce: nReduce}
+	nMap := len(files) // 方便起见，目前设定一个文件一个map，可以更改
+	c := Coordinator{filenames: files, nReduce: nReduce, mapTasks: make([]task, nMap), reduceTasks: make([]task, nReduce)}
 
 	// Your code here.
 	/*for _, filename := range files {
