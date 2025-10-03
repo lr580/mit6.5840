@@ -48,8 +48,7 @@ type Coordinator struct {
 	reduceTasks []task
 	mutexTask   sync.Mutex
 	status      uint8 //多个状态方便扩展
-	// isReducing  bool // 是否两个状态不足，reduce 执行完后还要写总结果
-
+	// isReducing  bool // 两个状态不足，reduce 执行完后可以发送退出指令给 worker，两个状态的话还要再遍历比较麻烦
 }
 
 func (c *Coordinator) currentTasks() (tasks *[]task) {
@@ -71,13 +70,14 @@ func isAllCompleted(tasks []task) bool {
 }
 
 func (c *Coordinator) deadWorkerChecker() {
-	ticker := time.NewTicker(WAIT_TIME / 2) // 可自行修改周期
+	ticker := time.NewTicker(time.Second) //WAIT_TIME / 2) // 可自行修改周期
 	defer ticker.Stop()
 	for range ticker.C {
 		c.mutexTask.Lock()
 		tasks := c.currentTasks()
 		now := time.Now()
 		for i := range *tasks {
+			// mutex 粒度是否可以降低到 if 成立里？
 			if (*tasks)[i].status == RUNNING && now.Sub((*tasks)[i].startTime) > WAIT_TIME {
 				// 直接设置状态即可。如果后面发现 worker 没挂，让该任务被执行多次，因幂等不影响结果。可以给读写同一文件的过程加锁，避免 reducer 执行读到一半被覆盖
 				(*tasks)[i].status = IDLE
@@ -100,7 +100,9 @@ func (c *Coordinator) Allocate(_ *struct{}, reply *AllocatedTask) error {
 	c.mutexTask.Lock()
 	defer c.mutexTask.Unlock()
 	if c.status == FINISHED { // 区分需要等待(如reduce还没开始都在map)
-		return errors.New("任务已完成，请退出")
+		// return errors.New("任务已完成，请退出")
+		reply.TaskType = FINISHED
+		return nil
 	}
 	tasks := c.currentTasks()
 	// 认为 tasks 少(<1e4)，简单起见直接遍历；如果任务多，可以额外维护 bitset 或 map (未完成 tasks 集) 等。
