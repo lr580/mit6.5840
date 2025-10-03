@@ -10,9 +10,9 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -47,6 +47,7 @@ func mapping(mapf func(string, string) []KeyValue, taskId int, filename string, 
 		kv_bin[h] = append(kv_bin[h], kva[i])
 	}
 	for y := range kv_bin {
+		// 应该假定没有任何 job 名字是纯数字
 		filename := fmt.Sprintf("mr-%v-%v", taskId, y)
 		if err := WriteKVtoFile(filename, kv_bin[y]); err != nil {
 			return false
@@ -60,10 +61,15 @@ func reducing(reducef func(string, []string) string, taskId int) bool {
 	pattern := fmt.Sprintf("mr-*-%v", taskId)
 	filenames, _ := filepath.Glob(pattern)
 	for _, filename := range filenames {
+		if !isValidFormat(filename) { // 再次过滤文件格式
+			continue
+		}
 		kva, err := ReadKVFile(filename)
 		if err != nil {
+			fmt.Printf("读取 KV 文件失败 %v\n", filename) // Unexpected for design，如果发生，应该有 bugs
 			return false
 		}
+		// fmt.Printf("读取成功 %v\n", filename)
 		intermediate = append(intermediate, kva...)
 	}
 	sort.Sort(ByKey(intermediate))
@@ -94,10 +100,11 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+mainloop:
 	for {
 		allocatedTask := AllocatedTask{}
 		ok := call("Coordinator.Allocate", &Empty{}, &allocatedTask)
-		if !ok { // 简单起见，coordinator 报告执行完毕，则直接退出
+		if !ok { // 任意意外，如连接不上，退出
 			break
 		}
 		success := true
@@ -111,6 +118,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			success = mapping(mapf, allocatedTask.TaskId, allocatedTask.Filepath, allocatedTask.NReduce)
 		case REDUCING:
 			success = reducing(reducef, allocatedTask.TaskId)
+		case FINISHED:
+			break mainloop
 		} // default break
 
 		reportedTask := ReportedTask{TaskType: allocatedTask.TaskType, TaskId: allocatedTask.TaskId, IsDone: success}
@@ -166,19 +175,19 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 
 	if err.Error() != "当前任务已完成：当前阶段与报告阶段不一致" { // SPJ
-		if err.Error() != "任务已完成，请退出" {
-			fmt.Println(err)
-		}
+		// if err.Error() != "任务已完成，请退出" {
+		fmt.Println(err)
+		// }
 	}
 	return false
 }
 
 // 下面是文件I/O部分
-var ioMutex sync.Mutex
+// var ioMutex sync.Mutex // 由于写操作 os.Rename 原子，不需要对读加锁，不会出现读写竞态等问题。
 
 func ReadFile(filename string) string {
-	ioMutex.Lock() // 简单起见，全局锁，防止被覆盖(down的任务又up，导致同一个文件多个读写)
-	defer ioMutex.Unlock()
+	// ioMutex.Lock() // 简单起见，全局锁，防止被覆盖(down的任务又up，导致同一个文件多个读写)
+	// defer ioMutex.Unlock()
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -211,8 +220,8 @@ func WriteFile(filename string, writeFunc func(*os.File) error) error {
 	if err := file.Sync(); err != nil {
 		return err
 	}
-	ioMutex.Lock() // 临时文件是唯一的，不需要锁
-	defer ioMutex.Unlock()
+	// ioMutex.Lock() // 临时文件是唯一的，不需要锁
+	// defer ioMutex.Unlock()
 	return os.Rename(tempFile, filename)
 }
 
@@ -233,8 +242,8 @@ func WriteKVtoFile(filename string, kva []KeyValue) error {
 }
 
 func ReadKVFile(filename string) ([]KeyValue, error) {
-	ioMutex.Lock()
-	defer ioMutex.Unlock()
+	// ioMutex.Lock()
+	// defer ioMutex.Unlock()
 
 	file, err := os.Open(filename)
 	if err != nil {
@@ -269,4 +278,15 @@ func ReadKVFile(filename string) ([]KeyValue, error) {
 		return nil, fmt.Errorf("cannot read %v: %w", filename, err)
 	}
 	return kvs, nil
+}
+
+func isValidFormat(s string) bool {
+	// 注意到存在 mr-worker-jobcount-100340-0 这样的任务，不应该被匹配
+	// 正则表达式匹配 "mr-数字-数字" 格式
+	pattern := `^mr-\d+-\d+$`
+	matched, err := regexp.MatchString(pattern, s)
+	if err != nil {
+		return false
+	}
+	return matched
 }
