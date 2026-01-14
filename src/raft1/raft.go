@@ -167,13 +167,19 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // example RequestVote RPC handler.
@@ -254,13 +260,156 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+	// origin codes
+	// index := -1
+	// term := -1
+	// isLeader := true
 	// Your code here (3B).
+	rf.mu.Lock()
+	if rf.state != Leader {
+		term := rf.currentTerm
+		rf.mu.Unlock()
+		return -1, term, false
+	}
+	term := rf.currentTerm
+	index := len(rf.log)
+	entry := LogEntry{Term: term, Command: command}
+	rf.log = append(rf.log, entry)
+	rf.matchIndex[rf.me] = len(rf.log) - 1
+	rf.nextIndex[rf.me] = len(rf.log)
+	rf.persist()
+	rf.mu.Unlock()
 
-	return index, term, isLeader
+	rf.broadcastAppendEntries()
+
+	return index, term, true
+}
+
+func (rf *Raft) broadcastAppendEntries() {
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	rf.heartbeatDue = time.Now().Add(rf.heartbeatInterval)
+	rf.mu.Unlock()
+
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go rf.replicateLogToPeer(peer)
+	}
+}
+
+func (rf *Raft) replicateLogToPeer(server int) {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+		if rf.nextIndex[server] < 1 {
+			rf.nextIndex[server] = 1
+		}
+		if rf.nextIndex[server] > len(rf.log) {
+			rf.nextIndex[server] = len(rf.log)
+		}
+		nextIndex := rf.nextIndex[server]
+		prevIndex := nextIndex - 1
+		prevTerm := rf.log[prevIndex].Term
+		entries := make([]LogEntry, len(rf.log[nextIndex:]))
+		copy(entries, rf.log[nextIndex:])
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevIndex,
+			PrevLogTerm:  prevTerm,
+			Entries:      entries,
+			LeaderCommit: rf.commitIndex,
+		}
+		rf.mu.Unlock()
+
+		reply := AppendEntriesReply{}
+		if !rf.sendAppendEntries(server, &args, &reply) {
+			return
+		}
+
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.updateTerm(reply.Term)
+			rf.mu.Unlock()
+			return
+		}
+		if rf.state != Leader || args.Term != rf.currentTerm {
+			rf.mu.Unlock()
+			return
+		}
+		if reply.Success {
+			match := args.PrevLogIndex + len(args.Entries)
+			if match > rf.matchIndex[server] {
+				rf.matchIndex[server] = match
+				rf.nextIndex[server] = match + 1
+			}
+			rf.updateLeaderCommit()
+			rf.mu.Unlock()
+			return
+		}
+		rf.adjustNextIndexOnFailure(server, reply)
+		rf.mu.Unlock()
+		// 失败后立刻重试，直到网络或状态变化
+	}
+}
+
+// need lock
+func (rf *Raft) adjustNextIndexOnFailure(server int, reply AppendEntriesReply) {
+	if reply.ConflictTerm != -1 {
+		lastIndex := -1
+		for i := len(rf.log) - 1; i >= 1; i-- {
+			if rf.log[i].Term == reply.ConflictTerm {
+				lastIndex = i
+				break
+			}
+		}
+		if lastIndex != -1 {
+			rf.nextIndex[server] = lastIndex + 1
+			return
+		}
+	}
+	if reply.ConflictIndex > 0 {
+		rf.nextIndex[server] = reply.ConflictIndex
+		return
+	}
+	// 上面：优化算法(返回值多了conflicting参数)
+	// 下面：朴素算法(返回值只有两个参数)
+	if rf.nextIndex[server] > 1 {
+		rf.nextIndex[server]--
+	} else {
+		rf.nextIndex[server] = 1
+	}
+}
+
+// need lock
+func (rf *Raft) updateLeaderCommit() {
+	majority := len(rf.peers)/2 + 1
+	for idx := len(rf.log) - 1; idx > rf.commitIndex; idx-- {
+		if rf.log[idx].Term != rf.currentTerm {
+			continue
+		}
+		count := 1 // leader 自己
+		for peer := range rf.peers {
+			if peer == rf.me {
+				continue
+			}
+			if rf.matchIndex[peer] >= idx {
+				count++
+			}
+		}
+		if count >= majority {
+			rf.commitIndex = idx
+			break
+		}
+	}
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -321,6 +470,7 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = lastIndex + 1
 		rf.matchIndex[i] = 0
 	}
+	rf.matchIndex[rf.me] = lastIndex
 	rf.heartbeatDue = time.Now()
 }
 
@@ -357,36 +507,7 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	rf.mu.Lock() //defer会减少并发，不要defer
-	if rf.state != Leader {
-		rf.mu.Unlock()
-		return
-	}
-	term := rf.currentTerm
-	leader := rf.me
-	rf.heartbeatDue = time.Now().Add(rf.heartbeatInterval)
-	rf.mu.Unlock()
-
-	for peer := range rf.peers {
-		if peer == rf.me {
-			continue
-		}
-		go func(server int) {
-			args := AppendEntriesArgs{
-				Term:     term,
-				LeaderId: leader,
-			}
-			reply := AppendEntriesReply{}
-			if !rf.sendAppendEntries(server, &args, &reply) {
-				return
-			}
-			if reply.Term > term {
-				rf.mu.Lock()
-				rf.updateTerm(reply.Term)
-				rf.mu.Unlock()
-			}
-		}(peer)
-	}
+	rf.broadcastAppendEntries()
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -394,18 +515,82 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	reply.Term = rf.currentTerm
+	reply.Success = false
+	reply.ConflictIndex = 0
+	reply.ConflictTerm = -1
 	if args.Term < rf.currentTerm {
-		reply.Success = false
 		return
 	}
 	if args.Term > rf.currentTerm {
 		rf.updateTerm(args.Term)
-	} else {
-		rf.state = Follower
-		rf.resetElectionTimer()
 	}
-	reply.Term = rf.currentTerm
+	rf.state = Follower
+	rf.resetElectionTimer()
+	reply.Term = rf.currentTerm // updateTerm 可能会更新
+
+	// 优化算法(返回值多了conflicting参数)
+	// 如果朴素算法，两个 if 里只有 reply.Success = false (直接return)
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		conflictIndex := args.PrevLogIndex
+		for conflictIndex > 0 && rf.log[conflictIndex-1].Term == reply.ConflictTerm {
+			conflictIndex--
+		}
+		reply.ConflictIndex = conflictIndex
+		return
+	}
+
+	insertion := args.PrevLogIndex + 1
+	i := 0
+	for ; i < len(args.Entries); i++ {
+		pos := insertion + i
+		if pos >= len(rf.log) {
+			break
+		}
+		if rf.log[pos].Term != args.Entries[i].Term {
+			rf.log = rf.log[:pos]
+			break
+		}
+	}
+	if i < len(args.Entries) {
+		rf.log = append(rf.log, args.Entries[i:]...)
+		rf.persist()
+	}
 	reply.Success = true
+
+	if args.LeaderCommit > rf.commitIndex {
+		last := len(rf.log) - 1
+		if args.LeaderCommit < last {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = last
+		}
+	}
+}
+
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			index := rf.lastApplied
+			entry := rf.log[index]
+			msg := raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: index,
+			}
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
+		}
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (rf *Raft) ticker() {
@@ -472,6 +657,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 
 	return rf
 }
