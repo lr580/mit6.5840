@@ -64,8 +64,9 @@ type Raft struct {
 	nextIndex         []int
 	matchIndex        []int
 
-	state   int //Leader/Follower/Candidate
-	applyCh chan raftapi.ApplyMsg
+	state     int //Leader/Follower/Candidate
+	applyCh   chan raftapi.ApplyMsg
+	closeOnce sync.Once
 
 	// Follower 和 Candidate 如果在一个选举 timeout 内没有收到 leader 的心跳或新的投票请求，就会触发新一轮选举；但一旦收到合法的 AppendEntries 或投出一票，就要重置这个计时器
 	electionDeadline  time.Time
@@ -74,7 +75,7 @@ type Raft struct {
 }
 
 func (rf *Raft) resetElectionTimer() {
-	electionTimeout := time.Duration(300+rand.Intn(200)) * time.Millisecond
+	electionTimeout := time.Duration(600+rand.Intn(300)) * time.Millisecond
 	rf.electionDeadline = time.Now().Add(electionTimeout)
 }
 
@@ -455,94 +456,93 @@ func (rf *Raft) broadcastAppendEntries() {
 }
 
 func (rf *Raft) replicateLogToPeer(server int) {
-	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.state != Leader {
-			rf.mu.Unlock()
-			return
-		}
-		firstIndex := rf.lastIncludedIndex + 1
-		if rf.nextIndex[server] < firstIndex {
-			if len(rf.snapshot) == 0 {
-				rf.nextIndex[server] = firstIndex
-			} else {
-				args := InstallSnapshotArgs{
-					Term:              rf.currentTerm,
-					LeaderId:          rf.me,
-					LastIncludedIndex: rf.lastIncludedIndex,
-					LastIncludedTerm:  rf.lastIncludedTerm,
-					Data:              cloneBytes(rf.snapshot),
-				}
-				rf.mu.Unlock()
-				reply := InstallSnapshotReply{}
-				if !rf.sendInstallSnapshot(server, &args, &reply) {
-					return
-				}
-				rf.mu.Lock()
-				if reply.Term > rf.currentTerm {
-					rf.updateTerm(reply.Term)
-					rf.mu.Unlock()
-					return
-				}
-				if rf.state != Leader || args.Term != rf.currentTerm {
-					rf.mu.Unlock()
-					return
-				}
-				rf.matchIndex[server] = args.LastIncludedIndex
-				rf.nextIndex[server] = args.LastIncludedIndex + 1
-				rf.mu.Unlock()
-				continue
-			}
-		}
-		lastIndex := rf.lastLogIndex()
-		if rf.nextIndex[server] > lastIndex+1 {
-			rf.nextIndex[server] = lastIndex + 1
-		}
-		nextIndex := rf.nextIndex[server]
-		prevIndex := nextIndex - 1
-		prevTerm := rf.getLogTerm(prevIndex)
-		start := rf.logIndexToOffset(nextIndex)
-		entries := make([]LogEntry, len(rf.log)-start)
-		copy(entries, rf.log[start:])
-		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: prevIndex,
-			PrevLogTerm:  prevTerm,
-			Entries:      entries,
-			LeaderCommit: rf.commitIndex,
-		}
+	// 只发送一次，不要无限循环
+	// 下一次心跳会重新调用这个函数
+	rf.mu.Lock()
+	if rf.state != Leader {
 		rf.mu.Unlock()
-
-		reply := AppendEntriesReply{}
-		if !rf.sendAppendEntries(server, &args, &reply) {
-			return
-		}
-
-		rf.mu.Lock()
-		if reply.Term > rf.currentTerm {
-			rf.updateTerm(reply.Term)
-			rf.mu.Unlock()
-			return
-		}
-		if rf.state != Leader || args.Term != rf.currentTerm {
-			rf.mu.Unlock()
-			return
-		}
-		if reply.Success {
-			match := args.PrevLogIndex + len(args.Entries)
-			if match > rf.matchIndex[server] {
-				rf.matchIndex[server] = match
-				rf.nextIndex[server] = match + 1
-			}
-			rf.updateLeaderCommit()
-			rf.mu.Unlock()
-			return
-		}
-		rf.adjustNextIndexOnFailure(server, reply)
-		rf.mu.Unlock()
-		// 失败后立刻重试，直到网络或状态变化
+		return
 	}
+	firstIndex := rf.lastIncludedIndex + 1
+	if rf.nextIndex[server] < firstIndex {
+		if len(rf.snapshot) == 0 {
+			rf.nextIndex[server] = firstIndex
+		} else {
+			args := InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm:  rf.lastIncludedTerm,
+				Data:              cloneBytes(rf.snapshot),
+			}
+			rf.mu.Unlock()
+			reply := InstallSnapshotReply{}
+			if !rf.sendInstallSnapshot(server, &args, &reply) {
+				return
+			}
+			rf.mu.Lock()
+			if reply.Term > rf.currentTerm {
+				rf.updateTerm(reply.Term)
+				rf.mu.Unlock()
+				return
+			}
+			if rf.state != Leader || args.Term != rf.currentTerm {
+				rf.mu.Unlock()
+				return
+			}
+			rf.matchIndex[server] = args.LastIncludedIndex
+			rf.nextIndex[server] = args.LastIncludedIndex + 1
+			rf.mu.Unlock()
+			return
+		}
+	}
+	lastIndex := rf.lastLogIndex()
+	if rf.nextIndex[server] > lastIndex+1 {
+		rf.nextIndex[server] = lastIndex + 1
+	}
+	nextIndex := rf.nextIndex[server]
+	prevIndex := nextIndex - 1
+	prevTerm := rf.getLogTerm(prevIndex)
+	start := rf.logIndexToOffset(nextIndex)
+	entries := make([]LogEntry, len(rf.log)-start)
+	copy(entries, rf.log[start:])
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevIndex,
+		PrevLogTerm:  prevTerm,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+
+	reply := AppendEntriesReply{}
+	if !rf.sendAppendEntries(server, &args, &reply) {
+		return
+	}
+
+	rf.mu.Lock()
+	if reply.Term > rf.currentTerm {
+		rf.updateTerm(reply.Term)
+		rf.mu.Unlock()
+		return
+	}
+	if rf.state != Leader || args.Term != rf.currentTerm {
+		rf.mu.Unlock()
+		return
+	}
+	if reply.Success {
+		match := args.PrevLogIndex + len(args.Entries)
+		if match > rf.matchIndex[server] {
+			rf.matchIndex[server] = match
+			rf.nextIndex[server] = match + 1
+		}
+		rf.updateLeaderCommit()
+		rf.mu.Unlock()
+		return
+	}
+	rf.adjustNextIndexOnFailure(server, reply)
+	rf.mu.Unlock()
 }
 
 // need lock
@@ -609,6 +609,7 @@ func (rf *Raft) updateLeaderCommit() {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.closeOnce.Do(func() { close(rf.applyCh) })
 }
 
 func (rf *Raft) killed() bool {
@@ -814,6 +815,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotIndex: rf.lastIncludedIndex,
 	}
 	rf.mu.Unlock()
+
+	// 在发送前检查是否已经 killed，避免 panic
+	if rf.killed() {
+		return
+	}
 	rf.applyCh <- msg
 }
 
@@ -830,6 +836,10 @@ func (rf *Raft) applier() {
 				CommandIndex: index,
 			}
 			rf.mu.Unlock()
+			// 在发送前检查是否已经 killed，避免 panic
+			if rf.killed() {
+				return
+			}
 			rf.applyCh <- msg
 			rf.mu.Lock()
 		}
@@ -855,9 +865,9 @@ func (rf *Raft) ticker() {
 			rf.sendHeartbeats()
 		}
 
-		// pause for a random amount of time between 50 and 350
+		// pause for a random amount of time between 50 and 150
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 50 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -892,7 +902,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 
 	rf.applyCh = applyCh
-	rf.heartbeatInterval = 150 * time.Millisecond
+	rf.heartbeatInterval = 100 * time.Millisecond
 	rf.heartbeatDue = time.Now()
 	rf.resetElectionTimer()
 
