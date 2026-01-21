@@ -1,16 +1,18 @@
 package kvraft
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"time"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
 	// You will have to modify this struct.
+	leader int //servers[i], last leader
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
@@ -30,9 +32,24 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-
+	args := rpc.GetArgs{Key: key}
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := rpc.GetReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.Get", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			if reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey {
+				ck.leader = server
+				return reply.Value, reply.Version, reply.Err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	// You will have to modify this function.
-	return "", 0, ""
+	// return "", 0, ""
 }
 
 // Put updates key with value only if the version in the
@@ -54,5 +71,34 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	firstRPC := true
+
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := rpc.PutReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.Put", &args, &reply)
+
+			first := firstRPC
+			firstRPC = false
+
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+
+			ck.leader = server
+			switch reply.Err {
+			case rpc.OK, rpc.ErrNoKey:
+				return reply.Err
+			case rpc.ErrVersion:
+				if first {
+					return rpc.ErrVersion
+				}
+				return rpc.ErrMaybe
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// return ""
 }
