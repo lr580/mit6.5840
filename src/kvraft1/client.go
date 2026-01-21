@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"math/rand"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -12,11 +13,13 @@ type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
 	// You will have to modify this struct.
-	leader int //servers[i], last leader
+	leader    int //servers[i], last leader
+	clientId  int64
+	requestId int64
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, servers: servers}
+	ck := &Clerk{clnt: clnt, servers: servers, leader: 0, clientId: rand.Int63(), requestId: 1}
 	// You'll have to add code here.
 	return ck
 }
@@ -32,7 +35,11 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	args := rpc.GetArgs{Key: key}
+	args := rpc.GetArgs{
+		Key:      key,
+		Identity: rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId},
+	}
+	ck.requestId++
 	for {
 		for i := 0; i < len(ck.servers); i++ {
 			server := (ck.leader + i) % len(ck.servers)
@@ -71,7 +78,13 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	args := rpc.PutArgs{
+		Key:      key,
+		Value:    value,
+		Version:  version,
+		Identity: rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId},
+	}
+	ck.requestId++
 	firstRPC := true
 
 	for {
@@ -80,12 +93,12 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 			reply := rpc.PutReply{}
 			ok := ck.clnt.Call(ck.servers[server], "KVServer.Put", &args, &reply)
 
-			first := firstRPC
-			firstRPC = false
-
 			if !ok || reply.Err == rpc.ErrWrongLeader {
 				continue
 			}
+
+			first := firstRPC
+			firstRPC = false
 
 			ck.leader = server
 			switch reply.Err {
