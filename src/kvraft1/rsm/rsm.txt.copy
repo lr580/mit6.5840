@@ -201,11 +201,7 @@ func (rsm *RSM) applyCommand(msg raftapi.ApplyMsg) {
 	op, ok := msg.Command.(Op)
 	if !ok {
 		if waitOp, exists := rsm.waiting[msg.CommandIndex]; exists {
-			// 使用 select/default 避免阻塞（接收者可能已超时退出）
-			select {
-			case waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}:
-			default:
-			}
+			waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}
 			delete(rsm.waiting, msg.CommandIndex)
 		}
 		return
@@ -218,23 +214,13 @@ func (rsm *RSM) applyCommand(msg raftapi.ApplyMsg) {
 			// 这是我们等待的操作，检查我们是否仍然是 leader
 			curTerm, isLeader := rsm.rf.GetState()
 			if isLeader && curTerm == waitOp.term {
-				// 使用 select/default 避免阻塞
-				select {
-				case waitOp.replyCh <- OpResult{err: rpc.OK, reply: reply}:
-				default:
-				}
+				waitOp.replyCh <- OpResult{err: rpc.OK, reply: reply}
 			} else {
-				select {
-				case waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}:
-				default:
-				}
+				waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}
 			}
 		} else {
 			// 索引位置被不同的操作占用了（来自新 leader）
-			select {
-			case waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}:
-			default:
-			}
+			waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}
 		}
 		delete(rsm.waiting, msg.CommandIndex)
 	}
@@ -260,11 +246,7 @@ func (rsm *RSM) applySnapshot(msg raftapi.ApplyMsg) {
 	// 清理所有等待中的操作（它们都已过时）
 	for index, waitOp := range rsm.waiting {
 		if index <= msg.SnapshotIndex {
-			// 使用 select/default 避免阻塞
-			select {
-			case waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}:
-			default:
-			}
+			waitOp.replyCh <- OpResult{err: rpc.ErrWrongLeader, reply: nil}
 			delete(rsm.waiting, index)
 		}
 	}
