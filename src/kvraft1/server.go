@@ -16,6 +16,19 @@ type ValueVer struct {
 	Version rpc.Tversion
 }
 
+type LastResult struct {
+	RequestId int64
+	ReplyType byte
+	GetReply  rpc.GetReply
+	PutReply  rpc.PutReply
+}
+
+const (
+	replyNone byte = iota
+	replyGet
+	replyPut
+)
+
 type KVServer struct {
 	me   int
 	dead int32 // set by Kill()
@@ -23,13 +36,14 @@ type KVServer struct {
 
 	// Your definitions here.
 	// mu sync.Mutex
-	a map[string]ValueVer
+	table   map[string]ValueVer
+	results map[int64]LastResult
 }
 
 func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
 	// kv.mu.Lock()
 	// defer kv.mu.Unlock()
-	valueVer, ok := kv.a[args.Key]
+	valueVer, ok := kv.table[args.Key]
 	var reply rpc.GetReply
 	if !ok {
 		reply.Err = rpc.ErrNoKey
@@ -44,18 +58,18 @@ func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
 func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 	// kv.mu.Lock()
 	// defer kv.mu.Unlock()
-	valueVer, ok := kv.a[args.Key]
+	valueVer, ok := kv.table[args.Key]
 	var reply rpc.PutReply
 	if !ok {
 		if args.Version == rpc.Tversion(0) {
-			kv.a[args.Key] = ValueVer{args.Value, args.Version + 1}
+			kv.table[args.Key] = ValueVer{args.Value, args.Version + 1}
 			reply.Err = rpc.OK
 		} else {
 			reply.Err = rpc.ErrNoKey
 		}
 	} else {
 		if args.Version == valueVer.Version {
-			kv.a[args.Key] = ValueVer{args.Value, args.Version + 1}
+			kv.table[args.Key] = ValueVer{args.Value, args.Version + 1}
 			reply.Err = rpc.OK
 		} else {
 			reply.Err = rpc.ErrVersion
@@ -70,24 +84,59 @@ func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 // https://go.dev/tour/methods/16
 // https://go.dev/tour/methods/15
 func (kv *KVServer) DoOp(req any) any {
-	// Your code here
+	var (
+		clientId, requestId int64
+		hasIdent            bool
+	)
+	if v, ok := req.(rpc.Identifiable); ok {
+		clientId, requestId = v.IDs()
+		hasIdent = true
+		if res, exists := kv.results[clientId]; exists && requestId <= res.RequestId {
+			switch res.ReplyType {
+			case replyGet:
+				return res.GetReply
+			case replyPut:
+				return res.PutReply
+			default:
+				return nil
+			}
+		}
+	}
+
 	switch args := req.(type) {
 	case rpc.GetArgs:
-		return kv.doGet(args)
+		reply := kv.doGet(args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: reply}
+		}
+		return reply
 	case *rpc.GetArgs:
 		if args == nil {
 			return rpc.GetReply{Err: rpc.ErrWrongLeader}
 		}
-		return kv.doGet(*args)
+		reply := kv.doGet(*args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: reply}
+		}
+		return reply
 	case rpc.PutArgs:
-		return kv.doPut(args)
+		reply := kv.doPut(args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
+		}
+		return reply
 	case *rpc.PutArgs:
 		if args == nil {
 			return rpc.PutReply{Err: rpc.ErrWrongLeader}
 		}
-		return kv.doPut(*args)
+		reply := kv.doPut(*args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
+		}
+		return reply
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (kv *KVServer) Snapshot() []byte {
@@ -96,14 +145,17 @@ func (kv *KVServer) Snapshot() []byte {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if err := e.Encode(kv.a); err != nil {
-		return nil
+	if err := e.Encode(kv.table); err != nil {
+		panic(err)
+	}
+	if err := e.Encode(kv.results); err != nil {
+		panic(err)
 	}
 	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	if data == nil || len(data) == 0 {
+	if len(data) == 0 {
 		return
 	}
 
@@ -115,9 +167,15 @@ func (kv *KVServer) Restore(data []byte) {
 
 	var table map[string]ValueVer
 	if d.Decode(&table) == nil && table != nil {
-		kv.a = table
+		kv.table = table
 	} else {
-		kv.a = make(map[string]ValueVer)
+		kv.table = make(map[string]ValueVer)
+	}
+	var results map[int64]LastResult
+	if d.Decode(&results) == nil && results != nil {
+		kv.results = results
+	} else {
+		kv.results = make(map[int64]LastResult)
 	}
 }
 
@@ -196,9 +254,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rsm.Op{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
+	labgob.Register(rpc.PutReply{})
+	labgob.Register(rpc.GetReply{})
+	labgob.Register(LastResult{})
 
-	kv := &KVServer{me: me,
-		a: make(map[string]ValueVer)}
+	kv := &KVServer{
+		me:      me,
+		table:   make(map[string]ValueVer),
+		results: make(map[int64]LastResult),
+	}
+
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		kv.Restore(snapshot)
+	}
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.

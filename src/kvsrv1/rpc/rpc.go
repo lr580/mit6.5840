@@ -18,10 +18,22 @@ const (
 
 type Tversion uint64
 
+type Identity struct {
+	ClientId  int64
+	RequestId int64
+}
+
+type Identifiable interface { //练一下接口语法
+	IDs() (int64, int64)
+}
+
+func (id Identity) IDs() (int64, int64) { return id.ClientId, id.RequestId }
+
 type PutArgs struct {
 	Key     string
 	Value   string
 	Version Tversion
+	Identity
 }
 
 type PutReply struct {
@@ -30,6 +42,7 @@ type PutReply struct {
 
 type GetArgs struct {
 	Key string
+	Identity
 }
 
 type GetReply struct {
@@ -37,4 +50,3 @@ type GetReply struct {
 	Version Tversion
 	Err     Err
 }
-
