@@ -86,6 +86,13 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		waiting:  make(map[int]*waitingOp),
 		nextOpId: 1,
 	}
+
+	if persister != nil {
+		if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+			sm.Restore(snapshot)
+		}
+	}
+
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}

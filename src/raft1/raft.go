@@ -74,6 +74,15 @@ type Raft struct {
 	heartbeatDue      time.Time
 }
 
+func (rf *Raft) deliverApplyMsg(msg raftapi.ApplyMsg) {
+	defer func() {
+		if recover() != nil {
+			// applyCh closed due to shutdown; drop message
+		}
+	}()
+	rf.applyCh <- msg
+}
+
 func (rf *Raft) resetElectionTimer() {
 	electionTimeout := time.Duration(600+rand.Intn(300)) * time.Millisecond
 	rf.electionDeadline = time.Now().Add(electionTimeout)
@@ -820,7 +829,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if rf.killed() {
 		return
 	}
-	rf.applyCh <- msg
+	rf.deliverApplyMsg(msg)
 }
 
 func (rf *Raft) applier() {
@@ -840,7 +849,7 @@ func (rf *Raft) applier() {
 			if rf.killed() {
 				return
 			}
-			rf.applyCh <- msg
+			rf.deliverApplyMsg(msg)
 			rf.mu.Lock()
 		}
 		rf.mu.Unlock()
