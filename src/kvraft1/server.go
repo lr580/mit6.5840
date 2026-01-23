@@ -110,30 +110,30 @@ func (kv *KVServer) DoOp(req any) any {
 			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: reply}
 		}
 		return reply
-	case *rpc.GetArgs:
-		if args == nil {
-			return rpc.GetReply{Err: rpc.ErrWrongLeader}
-		}
-		reply := kv.doGet(*args)
-		if hasIdent {
-			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: reply}
-		}
-		return reply
+	// case *rpc.GetArgs:
+	// 	if args == nil {
+	// 		return rpc.GetReply{Err: rpc.ErrWrongLeader}
+	// 	}
+	// 	reply := kv.doGet(*args)
+	// 	if hasIdent {
+	// 		kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: reply}
+	// 	}
+	// 	return reply
 	case rpc.PutArgs:
 		reply := kv.doPut(args)
 		if hasIdent {
 			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
 		}
 		return reply
-	case *rpc.PutArgs:
-		if args == nil {
-			return rpc.PutReply{Err: rpc.ErrWrongLeader}
-		}
-		reply := kv.doPut(*args)
-		if hasIdent {
-			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
-		}
-		return reply
+	// case *rpc.PutArgs:
+	// 	if args == nil {
+	// 		return rpc.PutReply{Err: rpc.ErrWrongLeader}
+	// 	}
+	// 	reply := kv.doPut(*args)
+	// 	if hasIdent {
+	// 		kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
+	// 	}
+	// 	return reply
 	default:
 		return nil
 	}
