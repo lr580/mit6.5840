@@ -1,17 +1,41 @@
 package shardgrp
 
 import (
+	"bytes"
 	"sync/atomic"
-
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp/shardrpc"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
+type ValueVer struct {
+	Value   string
+	Version rpc.Tversion
+}
+
+type LastResult struct {
+	RequestId int64
+	ReplyType byte
+	GetReply  rpc.GetReply
+	PutReply  rpc.PutReply
+}
+
+const ( //reply type
+	replyNone byte = iota
+	replyGet
+	replyPut
+)
+
+type ShardState struct {
+	Num    shardcfg.Tnum
+	Frozen bool
+	Data   map[string]ValueVer
+}
 
 type KVServer struct {
 	me   int
@@ -20,30 +44,163 @@ type KVServer struct {
 	gid  tester.Tgid
 
 	// Your code here
+	table   map[string]ValueVer
+	results map[int64]LastResult
+	num     shardcfg.Tnum
 }
 
+func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
+	valueVer, ok := kv.table[args.Key]
+	var reply rpc.GetReply
+	if !ok {
+		reply.Err = rpc.ErrNoKey
+		return reply
+	}
+	reply.Err = rpc.OK
+	reply.Value = valueVer.Value
+	reply.Version = valueVer.Version
+	return reply
+}
+
+func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
+	valueVer, ok := kv.table[args.Key]
+	var reply rpc.PutReply
+	if !ok {
+		if args.Version == rpc.Tversion(0) {
+			kv.table[args.Key] = ValueVer{args.Value, args.Version + 1}
+			reply.Err = rpc.OK
+		} else {
+			reply.Err = rpc.ErrNoKey
+		}
+	} else {
+		if args.Version == valueVer.Version {
+			kv.table[args.Key] = ValueVer{args.Value, args.Version + 1}
+			reply.Err = rpc.OK
+		} else {
+			reply.Err = rpc.ErrVersion
+		}
+	}
+	return reply
+}
 
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
+	var clientId, requestId int64
+	var hasIdent bool
+	if v, ok := req.(rpc.Identifiable); ok {
+		clientId, requestId = v.IDs()
+		hasIdent = true
+		if res, exists := kv.results[clientId]; exists && requestId <= res.RequestId {
+			switch res.ReplyType {
+			case replyGet:
+				return res.GetReply
+			case replyPut:
+				return res.PutReply
+			default:
+				return nil
+			}
+		}
+	}
+	switch args := req.(type) {
+	case rpc.GetArgs:
+		reply := kv.doGet(args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: reply}
+		}
+		return reply
+	case rpc.PutArgs:
+		reply := kv.doPut(args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
+		}
+		return reply
+	}
 	return nil
 }
 
-
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(kv.table); err != nil {
+		panic(err)
+	}
+	if err := e.Encode(kv.results); err != nil {
+		panic(err)
+	}
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	if len(data) == 0 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var table map[string]ValueVer
+	if d.Decode(&table) == nil && table != nil {
+		kv.table = table
+	} else {
+		kv.table = make(map[string]ValueVer)
+	}
+	var results map[int64]LastResult
+	if d.Decode(&results) == nil && results != nil {
+		kv.results = results
+	} else {
+		kv.results = make(map[int64]LastResult)
+	}
+}
+
+func (kv *KVServer) doSubmit(req any, reply any) {
+	switch args := req.(type) {
+	case *rpc.GetArgs:
+		if args == nil {
+			if out, ok := reply.(*rpc.GetReply); ok {
+				out.Err = rpc.ErrWrongLeader
+			}
+			return
+		}
+	case *rpc.PutArgs:
+		if args == nil {
+			if out, ok := reply.(*rpc.PutReply); ok {
+				out.Err = rpc.ErrWrongLeader
+			}
+			return
+		}
+	}
+
+	err, result := kv.rsm.Submit(req)
+	switch out := reply.(type) {
+	case *rpc.GetReply:
+		if err != rpc.OK {
+			out.Err = err
+			return
+		}
+		if v, ok := result.(rpc.GetReply); ok {
+			*out = v
+		} else {
+			out.Err = rpc.ErrWrongLeader
+		}
+	case *rpc.PutReply:
+		if err != rpc.OK {
+			out.Err = err
+			return
+		}
+		if v, ok := result.(rpc.PutReply); ok {
+			*out = v
+		} else {
+			out.Err = rpc.ErrWrongLeader
+		}
+	}
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here
+	kv.doSubmit(args, reply)
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here
+	kv.doSubmit(args, reply)
 }
 
 // Freeze the specified shard (i.e., reject future Get/Puts for this
@@ -55,6 +212,10 @@ func (kv *KVServer) FreezeShard(args *shardrpc.FreezeShardArgs, reply *shardrpc.
 // Install the supplied state for the specified shard.
 func (kv *KVServer) InstallShard(args *shardrpc.InstallShardArgs, reply *shardrpc.InstallShardReply) {
 	// Your code here
+	if kv.num >= args.Num {
+		return
+	}
+
 }
 
 // Delete the specified shard.
@@ -93,8 +254,16 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.InstallShardArgs{})
 	labgob.Register(shardrpc.DeleteShardArgs{})
 	labgob.Register(rsm.Op{})
+	labgob.Register(rpc.PutReply{})
+	labgob.Register(rpc.GetReply{})
+	labgob.Register(LastResult{})
 
-	kv := &KVServer{gid: gid, me: me}
+	kv := &KVServer{gid: gid, me: me,
+		table:   make(map[string]ValueVer),
+		results: make(map[int64]LastResult)}
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		kv.Restore(snapshot)
+	}
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 
 	// Your code here

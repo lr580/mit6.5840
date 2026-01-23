@@ -5,13 +5,14 @@ package shardctrler
 //
 
 import (
-
-	"6.5840/kvsrv1"
-	"6.5840/kvtest1"
+	kvsrv "6.5840/kvsrv1"
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
+const configKey = "config/current"
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -45,6 +46,13 @@ func (sck *ShardCtrler) InitController() {
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
+	// _, ver, err := sck.Get(configKey)
+	// if err == rpc.ErrNoKey {
+	// 	ver = 0
+	// }
+	if err := sck.Put(configKey, cfg.String(), 0); err != rpc.OK {
+		panic("sck: Init config err " + err)
+	}
 }
 
 // Called by the tester to ask the controller to change the
@@ -55,10 +63,12 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// Your code here.
 }
 
-
 // Return the current configuration
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	// Your code here.
-	return nil
+	cfg, _, err := sck.Get(configKey)
+	if err == rpc.OK {
+		return shardcfg.FromString(cfg)
+	} // 可能需要重试？ if not ok
+	panic("sck: Query err " + err)
 }
-
