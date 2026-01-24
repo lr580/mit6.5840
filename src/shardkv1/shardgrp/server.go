@@ -47,6 +47,7 @@ type KVServer struct {
 	table   map[string]ValueVer
 	results map[int64]LastResult
 	num     shardcfg.Tnum
+	shards  [shardcfg.NShards]bool
 }
 
 func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
@@ -86,6 +87,7 @@ func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
 	var clientId, requestId int64
+	// at-most-once
 	var hasIdent bool
 	if v, ok := req.(rpc.Identifiable); ok {
 		clientId, requestId = v.IDs()
@@ -101,6 +103,24 @@ func (kv *KVServer) DoOp(req any) any {
 			}
 		}
 	}
+
+	// shard check
+	switch args := req.(type) {
+	case rpc.GetArgs:
+		shard := shardcfg.Key2Shard(args.Key)
+		if !kv.shards[shard] {
+			reply := rpc.GetReply{Err: rpc.ErrWrongGroup}
+			return reply
+		}
+	case rpc.PutArgs:
+		shard := shardcfg.Key2Shard(args.Key)
+		if !kv.shards[shard] {
+			reply := rpc.PutReply{Err: rpc.ErrWrongGroup}
+			return reply
+		}
+	}
+
+	// do op
 	switch args := req.(type) {
 	case rpc.GetArgs:
 		reply := kv.doGet(args)
@@ -128,6 +148,12 @@ func (kv *KVServer) Snapshot() []byte {
 	if err := e.Encode(kv.results); err != nil {
 		panic(err)
 	}
+	if err := e.Encode(kv.shards); err != nil {
+		panic(err)
+	}
+	if err := e.Encode(kv.num); err != nil {
+		panic(err)
+	}
 	return w.Bytes()
 }
 
@@ -138,38 +164,33 @@ func (kv *KVServer) Restore(data []byte) {
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
+
 	var table map[string]ValueVer
 	if d.Decode(&table) == nil && table != nil {
 		kv.table = table
 	} else {
 		kv.table = make(map[string]ValueVer)
 	}
+
 	var results map[int64]LastResult
 	if d.Decode(&results) == nil && results != nil {
 		kv.results = results
 	} else {
 		kv.results = make(map[int64]LastResult)
 	}
+
+	var shards [shardcfg.NShards]bool
+	if d.Decode(&shards) == nil {
+		kv.shards = shards
+	}
+
+	var num shardcfg.Tnum
+	if d.Decode(&num) == nil {
+		kv.num = num
+	}
 }
 
 func (kv *KVServer) doSubmit(req any, reply any) {
-	switch args := req.(type) {
-	case *rpc.GetArgs:
-		if args == nil {
-			if out, ok := reply.(*rpc.GetReply); ok {
-				out.Err = rpc.ErrWrongLeader
-			}
-			return
-		}
-	case *rpc.PutArgs:
-		if args == nil {
-			if out, ok := reply.(*rpc.PutReply); ok {
-				out.Err = rpc.ErrWrongLeader
-			}
-			return
-		}
-	}
-
 	err, result := kv.rsm.Submit(req)
 	switch out := reply.(type) {
 	case *rpc.GetReply:
@@ -196,11 +217,19 @@ func (kv *KVServer) doSubmit(req any, reply any) {
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	kv.doSubmit(args, reply)
+	if args == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	kv.doSubmit(*args, reply)
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	kv.doSubmit(args, reply)
+	if args == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	kv.doSubmit(*args, reply)
 }
 
 // Freeze the specified shard (i.e., reject future Get/Puts for this
@@ -260,7 +289,13 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 
 	kv := &KVServer{gid: gid, me: me,
 		table:   make(map[string]ValueVer),
-		results: make(map[int64]LastResult)}
+		results: make(map[int64]LastResult),
+		num:     shardcfg.NumFirst}
+	if gid == shardcfg.Gid1 {
+		for i := range shardcfg.NShards {
+			kv.shards[i] = true
+		}
+	}
 	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
 		kv.Restore(snapshot)
 	}
