@@ -20,19 +20,19 @@ import (
 )
 
 type Clerk struct {
-	clnt *tester.Clnt
-	sck  *shardctrler.ShardCtrler
-	// You will have to modify this struct.
+	clnt        *tester.Clnt
+	sck         *shardctrler.ShardCtrler
+	groupClerks map[tester.Tgid]*shardgrp.Clerk // cache clerks for each group
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
 // client can call it's Query method
 func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk {
 	ck := &Clerk{
-		clnt: clnt,
-		sck:  sck,
+		clnt:        clnt,
+		sck:         sck,
+		groupClerks: make(map[tester.Tgid]*shardgrp.Clerk),
 	}
-	// You'll have to add code here.
 	return ck
 }
 
@@ -45,7 +45,14 @@ func (ck *Clerk) doOp(key string, value string, version rpc.Tversion, isGet bool
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		groupClerk := shardgrp.MakeClerk(ck.clnt, servers)
+
+		// clerk 可以复用
+		groupClerk, exists := ck.groupClerks[gid]
+		if !exists {
+			groupClerk = shardgrp.MakeClerk(ck.clnt, servers)
+			ck.groupClerks[gid] = groupClerk
+		}
+
 		if isGet {
 			answer, ver, err = groupClerk.Get(key)
 		} else {

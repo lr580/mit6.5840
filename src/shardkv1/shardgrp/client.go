@@ -6,6 +6,7 @@ import (
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp/shardrpc"
 	tester "6.5840/tester1"
 )
 
@@ -26,9 +27,8 @@ func MakeClerk(clnt *tester.Clnt, servers []string) *Clerk {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{
 		Key:      key,
-		Identity: rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId},
+		Identity: ck.nextIdentity(),
 	}
-	ck.requestId++
 	for {
 		for i := 0; i < len(ck.servers); i++ {
 			server := (ck.leader + i) % len(ck.servers)
@@ -51,9 +51,8 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		Key:      key,
 		Value:    value,
 		Version:  version,
-		Identity: rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId},
+		Identity: ck.nextIdentity(),
 	}
-	ck.requestId++
 	firstRPC := true
 
 	for {
@@ -85,16 +84,89 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 }
 
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
-	// Your code here
-	return nil, ""
+	args := shardrpc.FreezeShardArgs{
+		Shard:    s,
+		Num:      num,
+		Identity: ck.nextIdentity(),
+	}
+
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := shardrpc.FreezeShardReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.FreezeShard", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			if reply.Err == rpc.OK {
+				ck.leader = server
+				return reply.State, reply.Err
+			}
+			if reply.Err == rpc.ErrWrongGroup {
+				return nil, reply.Err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
-	// Your code here
-	return ""
+	args := shardrpc.InstallShardArgs{
+		Shard:    s,
+		State:    state,
+		Num:      num,
+		Identity: ck.nextIdentity(),
+	}
+
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := shardrpc.InstallShardReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.InstallShard", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			if reply.Err == rpc.OK {
+				ck.leader = server
+				return reply.Err
+			}
+			if reply.Err == rpc.ErrWrongGroup {
+				return reply.Err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
-	// Your code here
-	return ""
+	args := shardrpc.DeleteShardArgs{
+		Shard:    s,
+		Num:      num,
+		Identity: ck.nextIdentity(),
+	}
+
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := shardrpc.DeleteShardReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.DeleteShard", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			if reply.Err == rpc.OK {
+				ck.leader = server
+				return reply.Err
+			}
+			if reply.Err == rpc.ErrWrongGroup {
+				return reply.Err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) nextIdentity() rpc.Identity {
+	id := rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId}
+	ck.requestId++
+	return id
 }

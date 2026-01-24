@@ -5,10 +5,13 @@ package shardctrler
 //
 
 import (
+	"time"
+
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp"
 	tester "6.5840/tester1"
 )
 
@@ -60,7 +63,79 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	// Your code here.
+	for {
+		old := sck.Query()
+
+		// 如果配置号已经超过了目标，说明已经被其他controller更新过了
+		if old.Num >= new.Num {
+			return
+		}
+
+		moves := 0
+		// 逐个迁移shard
+		allSuccess := true
+		for shard := 0; shard < shardcfg.NShards; shard++ {
+			oldGid := old.Shards[shard]
+			newGid := new.Shards[shard]
+			if oldGid == newGid {
+				continue
+			}
+			moves++
+
+			var shardState []byte
+			var oldClerk *shardgrp.Clerk
+
+			// Freeze
+			if oldGid != 0 {
+				oldServers, ok := old.Groups[oldGid]
+				if !ok {
+					allSuccess = false
+					break
+				}
+
+				oldClerk = shardgrp.MakeClerk(sck.clnt, oldServers)
+				var err rpc.Err
+				shardState, err = oldClerk.FreezeShard(shardcfg.Tshid(shard), new.Num)
+				if err != rpc.OK {
+					allSuccess = false
+					break
+				}
+			}
+
+			// Install
+			if newGid != 0 {
+				newServers, ok := new.Groups[newGid]
+				if !ok {
+					allSuccess = false
+					break
+				}
+
+				newClerk := shardgrp.MakeClerk(sck.clnt, newServers)
+				err := newClerk.InstallShard(shardcfg.Tshid(shard), shardState, new.Num)
+				if err != rpc.OK {
+					allSuccess = false
+					break
+				}
+			}
+
+			// Delete
+			if oldClerk != nil {
+				oldClerk.DeleteShard(shardcfg.Tshid(shard), new.Num)
+				// Best effort, ignore errors
+			}
+		}
+		// 如果所有shard都迁移成功，尝试更新配置
+		if allSuccess {
+			err := sck.Put(configKey, new.String(), rpc.Tversion(old.Num))
+			if err == rpc.OK {
+				return // 成功更新配置
+			}
+			// ErrVersion说明配置已被其他controller更新，重试
+		}
+
+		// 失败或冲突，重试整个过程
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Return the current configuration
