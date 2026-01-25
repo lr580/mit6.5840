@@ -120,8 +120,10 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 
 			// Delete
 			if oldClerk != nil {
-				oldClerk.DeleteShard(shardcfg.Tshid(shard), new.Num)
-				// Best effort, ignore errors
+				if err := oldClerk.DeleteShard(shardcfg.Tshid(shard), new.Num); err != rpc.OK {
+					allSuccess = false
+					break
+				}
 			}
 		}
 		// 如果所有shard都迁移成功，尝试更新配置

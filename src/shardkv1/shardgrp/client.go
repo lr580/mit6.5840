@@ -24,42 +24,51 @@ func MakeClerk(clnt *tester.Clnt, servers []string) *Clerk {
 	return ck
 }
 
-func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	args := rpc.GetArgs{
-		Key:      key,
-		Identity: ck.nextIdentity(),
-	}
+func (ck *Clerk) callGet(args *rpc.GetArgs) (string, rpc.Tversion, rpc.Err) {
+	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
 		for i := 0; i < len(ck.servers); i++ {
 			server := (ck.leader + i) % len(ck.servers)
 			reply := rpc.GetReply{}
-			ok := ck.clnt.Call(ck.servers[server], "KVServer.Get", &args, &reply)
-			if !ok || reply.Err == rpc.ErrWrongLeader {
-				continue
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.Get", args, &reply)
+			if ok && reply.Err != rpc.ErrWrongLeader {
+				if reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey {
+					ck.leader = server
+					return reply.Value, reply.Version, reply.Err
+				}
+				if reply.Err == rpc.ErrWrongGroup {
+					return reply.Value, reply.Version, reply.Err
+				}
 			}
-			if reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey || reply.Err == rpc.ErrWrongGroup {
-				ck.leader = server
-				return reply.Value, reply.Version, reply.Err
-			}
+		}
+		if time.Now().After(deadline) {
+			return "", 0, rpc.ErrWrongGroup
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	args := rpc.PutArgs{
+func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+	args := rpc.GetArgs{
 		Key:      key,
-		Value:    value,
-		Version:  version,
 		Identity: ck.nextIdentity(),
 	}
+	return ck.callGet(&args)
+}
+
+func (ck *Clerk) DoGet(args *rpc.GetArgs) (string, rpc.Tversion, rpc.Err) {
+	return ck.callGet(args)
+}
+
+func (ck *Clerk) callPut(args *rpc.PutArgs) rpc.Err {
 	firstRPC := true
+	deadline := time.Now().Add(500 * time.Millisecond)
 
 	for {
 		for i := 0; i < len(ck.servers); i++ {
 			server := (ck.leader + i) % len(ck.servers)
 			reply := rpc.PutReply{}
-			ok := ck.clnt.Call(ck.servers[server], "KVServer.Put", &args, &reply)
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.Put", args, &reply)
 
 			if !ok || reply.Err == rpc.ErrWrongLeader {
 				continue
@@ -79,8 +88,25 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 				return rpc.ErrMaybe
 			}
 		}
+		if time.Now().After(deadline) {
+			return rpc.ErrWrongGroup
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
+	args := rpc.PutArgs{
+		Key:      key,
+		Value:    value,
+		Version:  version,
+		Identity: ck.nextIdentity(),
+	}
+	return ck.callPut(&args)
+}
+
+func (ck *Clerk) DoPut(args *rpc.PutArgs) rpc.Err {
+	return ck.callPut(args)
 }
 
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
