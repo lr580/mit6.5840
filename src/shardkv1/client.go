@@ -9,6 +9,7 @@ package shardkv
 //
 
 import (
+	"math/rand"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -19,10 +20,17 @@ import (
 	tester "6.5840/tester1"
 )
 
+type groupEntry struct {
+	servers []string
+	clerk   *shardgrp.Clerk
+}
+
 type Clerk struct {
 	clnt        *tester.Clnt
 	sck         *shardctrler.ShardCtrler
-	groupClerks map[tester.Tgid]*shardgrp.Clerk // cache clerks for each group
+	groupClerks map[tester.Tgid]*groupEntry // cache clerks for each group
+	clientId    int64
+	requestId   int64
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
@@ -31,12 +39,27 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 	ck := &Clerk{
 		clnt:        clnt,
 		sck:         sck,
-		groupClerks: make(map[tester.Tgid]*shardgrp.Clerk),
+		groupClerks: make(map[tester.Tgid]*groupEntry),
+		clientId:    rand.Int63(),
 	}
 	return ck
 }
 
+func (ck *Clerk) nextIdentity() rpc.Identity {
+	id := rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId}
+	ck.requestId++
+	return id
+}
+
 func (ck *Clerk) doOp(key string, value string, version rpc.Tversion, isGet bool) (answer string, ver rpc.Tversion, err rpc.Err) {
+	identity := ck.nextIdentity()
+	var getArgs rpc.GetArgs
+	var putArgs rpc.PutArgs
+	if isGet {
+		getArgs = rpc.GetArgs{Key: key, Identity: identity}
+	} else {
+		putArgs = rpc.PutArgs{Key: key, Value: value, Version: version, Identity: identity}
+	}
 	for {
 		cfg := ck.sck.Query()
 		shard := shardcfg.Key2Shard(key)
@@ -46,19 +69,15 @@ func (ck *Clerk) doOp(key string, value string, version rpc.Tversion, isGet bool
 			continue
 		}
 
-		// clerk 可以复用
-		groupClerk, exists := ck.groupClerks[gid]
-		if !exists {
-			groupClerk = shardgrp.MakeClerk(ck.clnt, servers)
-			ck.groupClerks[gid] = groupClerk
-		}
+		groupClerk := ck.ensureGroupClerk(gid, servers)
 
 		if isGet {
-			answer, ver, err = groupClerk.Get(key)
+			answer, ver, err = groupClerk.DoGet(&getArgs)
 		} else {
-			err = groupClerk.Put(key, value, version)
+			err = groupClerk.DoPut(&putArgs)
 		}
 		if err == rpc.ErrWrongGroup {
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		return answer, ver, err
@@ -80,4 +99,37 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
 	_, _, err := ck.doOp(key, value, version, false)
 	return err
+}
+
+func copyServers(servers []string) []string {
+	cp := make([]string, len(servers))
+	copy(cp, servers)
+	return cp
+}
+
+func sameServers(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (ck *Clerk) ensureGroupClerk(gid tester.Tgid, servers []string) *shardgrp.Clerk {
+	if entry, ok := ck.groupClerks[gid]; ok {
+		if sameServers(entry.servers, servers) {
+			return entry.clerk
+		}
+	}
+
+	newEntry := &groupEntry{
+		servers: copyServers(servers),
+		clerk:   shardgrp.MakeClerk(ck.clnt, servers),
+	}
+	ck.groupClerks[gid] = newEntry
+	return newEntry.clerk
 }
