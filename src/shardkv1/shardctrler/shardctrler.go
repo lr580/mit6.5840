@@ -21,6 +21,14 @@ const (
 	retryDelay    = 100 * time.Millisecond
 )
 
+type recordResult int
+
+const (
+	recordRetry recordResult = iota
+	recordWait
+	recordProceed
+)
+
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
 	clnt *tester.Clnt
@@ -77,8 +85,18 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// if err == rpc.ErrNoKey {
 	// 	ver = 0
 	// }
-	if err := sck.Put(configKey, cfg.String(), 0); err != rpc.OK {
-		panic("sck: Init config err " + err)
+	cfgStr := cfg.String()
+	for {
+		switch err := sck.Put(configKey, cfgStr, 0); err {
+		case rpc.OK:
+			return
+		case rpc.ErrMaybe, rpc.ErrVersion:
+			if cur, _, gErr := sck.Get(configKey); gErr == rpc.OK && cur == cfgStr {
+				return
+			}
+		default:
+			time.Sleep(retryDelay)
+		}
 	}
 }
 
@@ -95,13 +113,13 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 			return
 		}
 
-		if !sck.recordNextConfig(new) {
-			time.Sleep(retryDelay)
-			continue
-		}
-
-		if sck.advanceConfig(current, new) {
-			return
+		switch sck.recordNextConfig(current, new) {
+		case recordProceed:
+			if sck.advanceConfig(current, new) {
+				return
+			}
+		case recordRetry:
+		case recordWait:
 		}
 
 		time.Sleep(retryDelay)
@@ -118,8 +136,7 @@ func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	panic("sck: Query err " + err)
 }
 
-// advanceConfig migrates shards and attempts to atomically install target as the
-// next current configuration.
+// advanceConfig 负责迁移分片，并尝试用原子方式将 target 写成新的 current。
 func (sck *ShardCtrler) advanceConfig(current, target *shardcfg.ShardConfig) bool {
 	if !sck.migrateShards(current, target) {
 		return false
@@ -127,23 +144,47 @@ func (sck *ShardCtrler) advanceConfig(current, target *shardcfg.ShardConfig) boo
 	return sck.Put(configKey, target.String(), rpc.Tversion(current.Num)) == rpc.OK
 }
 
-// recordNextConfig writes the provided configuration to nextConfigKey, ensuring
-// future controllers can resume the migration.
-func (sck *ShardCtrler) recordNextConfig(cfg *shardcfg.ShardConfig) bool {
-	_, ver, err := sck.Get(nextConfigKey)
-	switch err {
-	case rpc.ErrNoKey:
-		ver = 0
-	case rpc.OK:
-	default:
-		return false
+// recordNextConfig 将目标配置写入 nextConfigKey，保证后续 controller 能接力迁移。
+func (sck *ShardCtrler) recordNextConfig(current, target *shardcfg.ShardConfig) recordResult {
+	targetStr := target.String()
+
+	nextStr, ver, err := sck.Get(nextConfigKey)
+	if err != rpc.OK && err != rpc.ErrNoKey {
+		return recordRetry
 	}
 
-	err = sck.Put(nextConfigKey, cfg.String(), ver)
-	return err == rpc.OK || err == rpc.ErrNoKey
+	if err == rpc.ErrNoKey {
+		ver = 0
+	} else {
+		nextCfg := shardcfg.FromString(nextStr)
+		switch {
+		case nextCfg.Num > target.Num:
+			return recordWait
+		case nextCfg.Num == target.Num:
+			if nextStr == targetStr {
+				return recordProceed
+			}
+			return recordWait
+		case nextCfg.Num > current.Num:
+			return recordWait
+		case nextCfg.Num <= current.Num:
+			// 这是旧记录，可以被覆盖
+		}
+	}
+
+	switch err := sck.Put(nextConfigKey, targetStr, ver); err {
+	case rpc.OK:
+		return recordProceed
+	case rpc.ErrVersion, rpc.ErrNoKey:
+		return recordWait
+	case rpc.ErrMaybe:
+		return recordRetry
+	default:
+		return recordRetry
+	}
 }
 
-// loadNextConfig deserializes the pending next configuration, if any.
+// loadNextConfig 读取并反序列化挂起的下一份配置。
 func (sck *ShardCtrler) loadNextConfig() (*shardcfg.ShardConfig, rpc.Err) {
 	cfgStr, _, err := sck.Get(nextConfigKey)
 	if err != rpc.OK {
@@ -152,8 +193,7 @@ func (sck *ShardCtrler) loadNextConfig() (*shardcfg.ShardConfig, rpc.Err) {
 	return shardcfg.FromString(cfgStr), rpc.OK
 }
 
-// migrateShards moves shards from current to target and returns true if all
-// moves either succeeded or were skipped because RPCs can be retried later.
+// migrateShards 将分片从 current 迁移到 target，所有移动成功或可重试时返回 true。
 func (sck *ShardCtrler) migrateShards(current, target *shardcfg.ShardConfig) bool {
 	for shard := 0; shard < shardcfg.NShards; shard++ {
 		oldGid := current.Shards[shard]
