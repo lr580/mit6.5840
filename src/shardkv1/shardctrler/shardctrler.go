@@ -15,7 +15,11 @@ import (
 	tester "6.5840/tester1"
 )
 
-const configKey = "config/current"
+const (
+	configKey     = "config/current"
+	nextConfigKey = "config/next"
+	retryDelay    = 100 * time.Millisecond
+)
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -40,6 +44,26 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	for {
+		current := sck.Query()
+
+		next, err := sck.loadNextConfig()
+		if err == rpc.ErrNoKey {
+			return
+		}
+		if err != rpc.OK {
+			time.Sleep(retryDelay)
+			continue
+		}
+		if next.Num <= current.Num {
+			return
+		}
+
+		if sck.advanceConfig(current, next) {
+			continue
+		}
+		time.Sleep(retryDelay)
+	}
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -64,79 +88,23 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	for {
-		old := sck.Query()
+		current := sck.Query()
 
 		// 如果配置号已经超过了目标，说明已经被其他controller更新过了
-		if old.Num >= new.Num {
+		if current.Num >= new.Num {
 			return
 		}
 
-		moves := 0
-		// 逐个迁移shard
-		allSuccess := true
-		for shard := 0; shard < shardcfg.NShards; shard++ {
-			oldGid := old.Shards[shard]
-			newGid := new.Shards[shard]
-			if oldGid == newGid {
-				continue
-			}
-			moves++
-
-			var shardState []byte
-			var oldClerk *shardgrp.Clerk
-
-			// Freeze
-			if oldGid != 0 {
-				oldServers, ok := old.Groups[oldGid]
-				if !ok {
-					allSuccess = false
-					break
-				}
-
-				oldClerk = shardgrp.MakeClerk(sck.clnt, oldServers)
-				var err rpc.Err
-				shardState, err = oldClerk.FreezeShard(shardcfg.Tshid(shard), new.Num)
-				if err != rpc.OK {
-					allSuccess = false
-					break
-				}
-			}
-
-			// Install
-			if newGid != 0 {
-				newServers, ok := new.Groups[newGid]
-				if !ok {
-					allSuccess = false
-					break
-				}
-
-				newClerk := shardgrp.MakeClerk(sck.clnt, newServers)
-				err := newClerk.InstallShard(shardcfg.Tshid(shard), shardState, new.Num)
-				if err != rpc.OK {
-					allSuccess = false
-					break
-				}
-			}
-
-			// Delete
-			if oldClerk != nil {
-				if err := oldClerk.DeleteShard(shardcfg.Tshid(shard), new.Num); err != rpc.OK {
-					allSuccess = false
-					break
-				}
-			}
-		}
-		// 如果所有shard都迁移成功，尝试更新配置
-		if allSuccess {
-			err := sck.Put(configKey, new.String(), rpc.Tversion(old.Num))
-			if err == rpc.OK {
-				return // 成功更新配置
-			}
-			// ErrVersion说明配置已被其他controller更新，重试
+		if !sck.recordNextConfig(new) {
+			time.Sleep(retryDelay)
+			continue
 		}
 
-		// 失败或冲突，重试整个过程
-		time.Sleep(100 * time.Millisecond)
+		if sck.advanceConfig(current, new) {
+			return
+		}
+
+		time.Sleep(retryDelay)
 	}
 }
 
@@ -148,4 +116,96 @@ func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 		return shardcfg.FromString(cfg)
 	} // 可能需要重试？ if not ok
 	panic("sck: Query err " + err)
+}
+
+// advanceConfig migrates shards and attempts to atomically install target as the
+// next current configuration.
+func (sck *ShardCtrler) advanceConfig(current, target *shardcfg.ShardConfig) bool {
+	if !sck.migrateShards(current, target) {
+		return false
+	}
+	return sck.Put(configKey, target.String(), rpc.Tversion(current.Num)) == rpc.OK
+}
+
+// recordNextConfig writes the provided configuration to nextConfigKey, ensuring
+// future controllers can resume the migration.
+func (sck *ShardCtrler) recordNextConfig(cfg *shardcfg.ShardConfig) bool {
+	_, ver, err := sck.Get(nextConfigKey)
+	switch err {
+	case rpc.ErrNoKey:
+		ver = 0
+	case rpc.OK:
+	default:
+		return false
+	}
+
+	err = sck.Put(nextConfigKey, cfg.String(), ver)
+	return err == rpc.OK || err == rpc.ErrNoKey
+}
+
+// loadNextConfig deserializes the pending next configuration, if any.
+func (sck *ShardCtrler) loadNextConfig() (*shardcfg.ShardConfig, rpc.Err) {
+	cfgStr, _, err := sck.Get(nextConfigKey)
+	if err != rpc.OK {
+		return nil, err
+	}
+	return shardcfg.FromString(cfgStr), rpc.OK
+}
+
+// migrateShards moves shards from current to target and returns true if all
+// moves either succeeded or were skipped because RPCs can be retried later.
+func (sck *ShardCtrler) migrateShards(current, target *shardcfg.ShardConfig) bool {
+	for shard := 0; shard < shardcfg.NShards; shard++ {
+		oldGid := current.Shards[shard]
+		newGid := target.Shards[shard]
+		if oldGid == newGid {
+			continue
+		}
+
+		var shardState []byte
+		var oldClerk *shardgrp.Clerk
+		shouldDelete := false
+
+		if oldGid != 0 {
+			if servers, ok := sck.lookupOldGroup(current, target, oldGid); ok {
+				oldClerk = shardgrp.MakeClerk(sck.clnt, servers)
+				var err rpc.Err
+				shardState, err = oldClerk.FreezeShard(shardcfg.Tshid(shard), target.Num)
+				if err == rpc.OK {
+					shouldDelete = true
+				} else {
+					shardState = nil
+				}
+			}
+		}
+
+		if newGid != 0 {
+			newServers, ok := target.Groups[newGid]
+			if !ok {
+				return false
+			}
+
+			newClerk := shardgrp.MakeClerk(sck.clnt, newServers)
+			if err := newClerk.InstallShard(shardcfg.Tshid(shard), shardState, target.Num); err != rpc.OK && err != rpc.ErrWrongGroup {
+				return false
+			}
+		}
+
+		if shouldDelete && oldClerk != nil {
+			if err := oldClerk.DeleteShard(shardcfg.Tshid(shard), target.Num); err != rpc.OK && err != rpc.ErrWrongGroup {
+				// Delete failure doesn't block progress; shard already installed.
+			}
+		}
+	}
+	return true
+}
+
+func (sck *ShardCtrler) lookupOldGroup(current, target *shardcfg.ShardConfig, gid tester.Tgid) ([]string, bool) {
+	if servers, ok := target.Groups[gid]; ok {
+		return servers, true
+	}
+	if servers, ok := current.Groups[gid]; ok {
+		return servers, true
+	}
+	return nil, false
 }
