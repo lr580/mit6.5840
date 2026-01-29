@@ -7,6 +7,7 @@ package shardctrler
 import (
 	"time"
 
+	kvraft "6.5840/kvraft1"
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
@@ -16,10 +17,20 @@ import (
 )
 
 const (
-	configKey     = "config/current"
-	nextConfigKey = "config/next"
-	retryDelay    = 100 * time.Millisecond
+	ControllerUseKVraft     = true //为true：5D扩展1
+	controllerReplicasKvraf = 3
+	controllerReplicasKVsrv = 1
+	configKey               = "config/current"
+	nextConfigKey           = "config/next"
+	retryDelay              = 100 * time.Millisecond
 )
+
+var ControllerReplicas = func() int {
+	if ControllerUseKVraft {
+		return controllerReplicasKvraf
+	}
+	return controllerReplicasKVsrv
+}()
 
 type recordResult int
 
@@ -39,11 +50,19 @@ type ShardCtrler struct {
 	// Your data here.
 }
 
-// Make a ShardCltler, which stores its state in a kvsrv.
-func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
+// Make a ShardCltler, which stores its state in a kvraft-based kvsrv when
+// ControllerUseKVraft is true, otherwise fall back to the lab2 kvsrv.
+func MakeShardCtrler(clnt *tester.Clnt, servers []string) *ShardCtrler {
 	sck := &ShardCtrler{clnt: clnt}
-	srv := tester.ServerName(tester.GRP0, 0)
-	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
+	if ControllerUseKVraft {
+		sck.IKVClerk = kvraft.MakeClerk(clnt, servers)
+	} else {
+		target := tester.ServerName(tester.GRP0, 0)
+		if len(servers) > 0 {
+			target = servers[0]
+		}
+		sck.IKVClerk = kvsrv.MakeClerk(clnt, target)
+	}
 	// Your code here.
 	return sck
 }

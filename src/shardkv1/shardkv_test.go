@@ -27,7 +27,8 @@ func TestInitQuery5A(t *testing.T) {
 	defer ts.Cleanup()
 
 	// Make a shard controller
-	sck := shardctrler.MakeShardCtrler(ts.Config.MakeClient())
+	clnt := ts.Config.MakeClient()
+	sck := shardctrler.MakeShardCtrler(clnt, ts.Group(Controler).SrvNames())
 
 	// Make an empty shard configuration
 	scfg := shardcfg.MakeShardConfig()
@@ -71,6 +72,38 @@ func TestStaticOneShardGroup5A(t *testing.T) {
 
 	for i := 0; i < n; i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1)) // check the puts
+	}
+}
+
+func TestControllerKvraftPeerFailure5D(t *testing.T) {
+	if !shardctrler.ControllerUseKVraft {
+		t.Skip("pass : skip")
+	}
+	ts := MakeTest(t, "Test (5D): controller survives kvraft peer failure ...", true)
+	defer ts.Cleanup()
+
+	ts.setupKVService()
+	sck := ts.ShardCtrler()
+
+	ctrlGrp := ts.Config.Group(Controler)
+	ctrlGrp.ShutdownServer(0)
+
+	cfg := sck.Query()
+	if cfg.Num == 0 {
+		ts.t.Fatalf("TestControllerKvraftPeerFailure5D: empty config after shutdown")
+	}
+
+	gid2 := ts.newGid()
+	if ok := ts.joinGroups(sck, []tester.Tgid{gid2}); !ok {
+		ts.t.Fatalf("TestControllerKvraftPeerFailure5D: joinGroups failed")
+	}
+
+	cfg1 := sck.Query()
+	if cfg1.Num <= cfg.Num {
+		ts.t.Fatalf("TestControllerKvraftPeerFailure5D: config num %d not advanced from %d", cfg1.Num, cfg.Num)
+	}
+	if !cfg1.IsMember(gid2) {
+		ts.t.Fatalf("TestControllerKvraftPeerFailure5D: gid %d not in config %v", gid2, cfg1)
 	}
 }
 

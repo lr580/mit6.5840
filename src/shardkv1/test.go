@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	kvraft "6.5840/kvraft1"
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
@@ -47,7 +48,7 @@ func MakeTestMaxRaft(t *testing.T, part string, reliable, partition bool, maxraf
 		partition:    partition,
 		maxraftstate: maxraftstate,
 	}
-	cfg := tester.MakeConfig(t, 1, reliable, kvsrv.StartKVServer)
+	cfg := tester.MakeConfig(t, shardctrler.ControllerReplicas, reliable, ts.StartControllerKVServer)
 	ts.Test = kvtest.MakeTest(t, cfg, false, ts)
 	// XXX to avoid panic
 	tester.AnnotateTest(part, 1)
@@ -85,7 +86,8 @@ func (ts *Test) makeShardCtrler() *shardctrler.ShardCtrler {
 
 func (ts *Test) makeShardCtrlerClnt() (*shardctrler.ShardCtrler, *tester.Clnt) {
 	clnt := ts.Config.MakeClient()
-	return shardctrler.MakeShardCtrler(clnt), clnt
+	servers := ts.Config.Group(Controler).SrvNames()
+	return shardctrler.MakeShardCtrler(clnt, servers), clnt
 }
 
 func (ts *Test) makeKVClerk() *kvsrv.Clerk {
@@ -124,6 +126,13 @@ func (ts *Test) setupKVService() tester.Tgid {
 
 func (ts *Test) StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persister *tester.Persister) []tester.IService {
 	return shardgrp.StartServerShardGrp(servers, gid, me, persister, ts.maxraftstate)
+}
+
+func (ts *Test) StartControllerKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persister *tester.Persister) []tester.IService {
+	if shardctrler.ControllerUseKVraft {
+		return kvraft.StartKVServer(servers, gid, me, persister, ts.maxraftstate)
+	}
+	return kvsrv.StartKVServer(servers, gid, me, persister)
 }
 
 func (ts *Test) checkMember(sck *shardctrler.ShardCtrler, gid tester.Tgid) bool {
