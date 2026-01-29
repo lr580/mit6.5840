@@ -7,6 +7,7 @@ package shardctrler
 import (
 	"time"
 
+	"6.5840/featureflag"
 	kvraft "6.5840/kvraft1"
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
@@ -17,13 +18,14 @@ import (
 )
 
 const (
-	ControllerUseKVraft     = true //为true：5D扩展1
 	controllerReplicasKvraf = 3
 	controllerReplicasKVsrv = 1
 	configKey               = "config/current"
 	nextConfigKey           = "config/next"
 	retryDelay              = 100 * time.Millisecond
 )
+
+var ControllerUseKVraft = featureflag.EnableControllerKVraft
 
 var ControllerReplicas = func() int {
 	if ControllerUseKVraft {

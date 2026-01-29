@@ -1,22 +1,38 @@
 package kvsrv
 
 import (
+	"math/rand"
 	"time"
 
+	"6.5840/featureflag"
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	tester "6.5840/tester1"
 )
 
 type Clerk struct {
-	clnt   *tester.Clnt
-	server string
+	clnt      *tester.Clnt
+	server    string
+	clientId  int64
+	requestId int64
 }
 
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 	ck := &Clerk{clnt: clnt, server: server}
-	// You may add code here.
+	if featureflag.EnableKVExactOnce {
+		ck.clientId = rand.Int63()
+		ck.requestId = 1
+	}
 	return ck
+}
+
+func (ck *Clerk) nextIdentity() rpc.Identity {
+	if !featureflag.EnableKVExactOnce {
+		return rpc.Identity{}
+	}
+	id := rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId}
+	ck.requestId++
+	return id
 }
 
 // Get fetches the current value and version for a key.  It returns
@@ -30,8 +46,10 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
 	args := rpc.GetArgs{Key: key}
+	if featureflag.EnableKVExactOnce {
+		args.Identity = ck.nextIdentity()
+	}
 	reply := rpc.GetReply{}
 	for {
 		ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
@@ -61,8 +79,10 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	if featureflag.EnableKVExactOnce {
+		args.Identity = ck.nextIdentity()
+	}
 	reply := rpc.PutReply{}
 	ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
 	if ok {

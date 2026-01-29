@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"6.5840/featureflag"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 )
@@ -125,6 +126,10 @@ func TestMemPutManyClientsReliable(t *testing.T) {
 // ErrMaybe, the Put must have happened, since the test uses only one
 // client.
 func TestUnreliableNet(t *testing.T) {
+	if featureflag.EnableKVExactOnce {
+		t.Skip("exactly-once enabled, ErrMaybe shouldn't occur")
+	}
+
 	const NTRY = 100
 
 	ts := MakeTestKV(t, false)
