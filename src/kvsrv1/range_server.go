@@ -46,7 +46,7 @@ type rangeLastResult struct {
 func MakeRangeKVServer() *RangeKVServer {
 	return &RangeKVServer{
 		a:       make(map[string]ValueVer),
-		tree:    btree.New(4),
+		tree:    btree.New(16),
 		results: make(map[int64]rangeLastResult),
 	}
 }

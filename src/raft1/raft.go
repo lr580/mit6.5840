@@ -15,6 +15,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/featureflag"
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
@@ -32,6 +33,8 @@ const (
 	Leader
 )
 
+const leaderLeaseDuration = 200 * time.Millisecond
+
 func cloneBytes(src []byte) []byte {
 	if src == nil {
 		return nil
@@ -39,6 +42,48 @@ func cloneBytes(src []byte) []byte {
 	dst := make([]byte, len(src))
 	copy(dst, src)
 	return dst
+}
+
+// need lock
+func (rf *Raft) resetLease() {
+	rf.leaseExpiry = time.Time{}
+	for i := range rf.lastContact {
+		rf.lastContact[i] = time.Time{}
+	}
+	rf.leaseBlockedUntil = time.Time{}
+}
+
+// need lock
+func (rf *Raft) noteFollowerContact(server int, now time.Time) {
+	if rf.state != Leader || rf.leaseDuration <= 0 {
+		return
+	}
+	rf.lastContact[server] = now
+	rf.maybeExtendLease(now)
+}
+
+// need lock
+func (rf *Raft) maybeExtendLease(now time.Time) {
+	if rf.state != Leader || rf.leaseDuration <= 0 {
+		return
+	}
+	if !rf.leaseBlockedUntil.IsZero() && now.Before(rf.leaseBlockedUntil) {
+		return
+	}
+	majority := len(rf.peers)/2 + 1
+	count := 1 // leader 自身
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		last := rf.lastContact[peer]
+		if !last.IsZero() && now.Sub(last) <= rf.leaseDuration {
+			count++
+		}
+	}
+	if count >= majority {
+		rf.leaseExpiry = now.Add(rf.leaseDuration)
+	}
 }
 
 // A Go object implementing a single Raft peer.
@@ -64,9 +109,13 @@ type Raft struct {
 	nextIndex         []int
 	matchIndex        []int
 
-	state     int //Leader/Follower/Candidate
-	applyCh   chan raftapi.ApplyMsg
-	closeOnce sync.Once
+	state             int //Leader/Follower/Candidate
+	applyCh           chan raftapi.ApplyMsg
+	closeOnce         sync.Once
+	leaseExpiry       time.Time
+	leaseDuration     time.Duration
+	lastContact       []time.Time
+	leaseBlockedUntil time.Time
 
 	// Follower 和 Candidate 如果在一个选举 timeout 内没有收到 leader 的心跳或新的投票请求，就会触发新一轮选举；但一旦收到合法的 AppendEntries 或投出一票，就要重置这个计时器
 	electionDeadline  time.Time
@@ -129,6 +178,7 @@ func (rf *Raft) updateTerm(term int) {
 	if term <= rf.currentTerm {
 		return
 	}
+	rf.resetLease()
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.state = Follower
@@ -147,6 +197,18 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = (rf.state == Leader)
 	return term, isleader
+}
+
+func (rf *Raft) HasLease() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != Leader || rf.leaseDuration <= 0 {
+		return false
+	}
+	if rf.leaseExpiry.IsZero() {
+		return false
+	}
+	return time.Now().Before(rf.leaseExpiry)
 }
 
 // save Raft's persistent state to stable storage,
@@ -501,6 +563,7 @@ func (rf *Raft) replicateLogToPeer(server int) {
 			}
 			rf.matchIndex[server] = args.LastIncludedIndex
 			rf.nextIndex[server] = args.LastIncludedIndex + 1
+			rf.noteFollowerContact(server, time.Now())
 			rf.mu.Unlock()
 			return
 		}
@@ -547,6 +610,7 @@ func (rf *Raft) replicateLogToPeer(server int) {
 			rf.nextIndex[server] = match + 1
 		}
 		rf.updateLeaderCommit()
+		rf.noteFollowerContact(server, time.Now())
 		rf.mu.Unlock()
 		return
 	}
@@ -660,13 +724,22 @@ func (rf *Raft) requestVoteFromPeer(server int, args RequestVoteArgs, term int, 
 // need lock
 func (rf *Raft) becomeLeader() {
 	rf.state = Leader
+	now := time.Now()
+	rf.resetLease()
+	if rf.leaseDuration > 0 {
+		rf.leaseBlockedUntil = now.Add(rf.leaseDuration)
+	}
 	lastIndex, _ := rf.getLastLog()
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = lastIndex + 1
 		rf.matchIndex[i] = rf.lastIncludedIndex
 	}
 	rf.matchIndex[rf.me] = lastIndex
-	rf.heartbeatDue = time.Now()
+	rf.heartbeatDue = now
+	if len(rf.peers) == 1 && rf.leaseDuration > 0 {
+		rf.leaseBlockedUntil = time.Time{}
+		rf.leaseExpiry = now.Add(rf.leaseDuration)
+	}
 }
 
 func (rf *Raft) startElection() {
@@ -913,6 +986,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.heartbeatInterval = 100 * time.Millisecond
 	rf.heartbeatDue = time.Now()
+	if featureflag.EnableKVFastLeaseGet {
+		rf.leaseDuration = leaderLeaseDuration
+	} else {
+		rf.leaseDuration = 0
+	}
+	rf.lastContact = make([]time.Time, len(peers))
 	rf.resetElectionTimer()
 
 	// initialize from state persisted before a crash

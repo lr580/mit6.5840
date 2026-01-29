@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"6.5840/featureflag"
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
+	"6.5840/raftapi"
 	tester "6.5840/tester1"
 )
 
@@ -479,4 +481,183 @@ func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable4C(t *testing.T
 	ts := MakeTest(t, "4C unreliable net, restarts, partitions, snapshots, random keys, many clients", 15, 7, false, true, true, 1000, true)
 	tester.AnnotateTest("TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable4C", ts.nservers)
 	ts.GenericTest()
+}
+
+func TestLeaseFastGetReducesRPCs(t *testing.T) {
+	slow := measureLeaseRPCs(t, false)
+	fast := measureLeaseRPCs(t, true)
+	if fast >= slow {
+		t.Fatalf("expected lease fast path to reduce RPCs, slow=%d fast=%d", slow, fast)
+	}
+}
+
+func TestLeaseWaitsAfterTermSwitch(t *testing.T) {
+	restore := setLeaseFlag(true)
+	defer restore()
+
+	ts := MakeTest(t, "5D lease term switch", 1, 3, true, false, false, -1, false)
+	tester.AnnotateTest("TestLeaseWaitsAfterTermSwitch (5D)", ts.nservers)
+	defer ts.Cleanup()
+
+	ck := ts.MakeClerk()
+	defer ts.DeleteClerk(ck)
+
+	if err := ck.Put("lease", "init", rpc.Tversion(0)); err != rpc.OK {
+		t.Fatalf("initial put failed %v", err)
+	}
+
+	leaderIdx, _ := waitForLease(t, ts, 5*time.Second)
+	if before := countGetRPCs(ts, ck, "lease"); before > 2 {
+		t.Fatalf("expected fast get before switch to be cheap, got %d RPCs", before)
+	}
+
+	ts.Group(Gid).ShutdownServer(leaderIdx)
+	defer ts.Group(Gid).StartServer(leaderIdx)
+
+	newLeaderIdx := waitForLeaderChange(t, ts, leaderIdx, 5*time.Second)
+
+	if !waitForLeaseState(t, ts, newLeaderIdx, false, time.Second) {
+		t.Fatalf("expected new leader to start without lease")
+	}
+
+	slowRPCs := countGetRPCs(ts, ck, "lease")
+	if slowRPCs < 3 {
+		t.Fatalf("expected slow path immediately after term switch, got %d RPCs", slowRPCs)
+	}
+
+	waitForSpecificLease(t, ts, newLeaderIdx, 5*time.Second)
+
+	fastRPCs := countGetRPCs(ts, ck, "lease")
+	if slowRPCs <= fastRPCs {
+		t.Fatalf("expected RPCs to drop once lease re-established, slow=%d fast=%d", slowRPCs, fastRPCs)
+	}
+}
+
+func measureLeaseRPCs(t *testing.T, enabled bool) int {
+	restore := setLeaseFlag(enabled)
+	defer restore()
+
+	ts := MakeTest(t, "5D lease rpc compare", 1, 3, true, false, false, -1, false)
+	tester.AnnotateTest("TestLeaseRPCCompare (5D)", ts.nservers)
+	defer ts.Cleanup()
+
+	ck := ts.MakeClerk()
+	defer ts.DeleteClerk(ck)
+
+	if err := ck.Put("lease", "base", rpc.Tversion(0)); err != rpc.OK {
+		t.Fatalf("Put failed: %v", err)
+	}
+	if enabled {
+		waitForLease(t, ts, 5*time.Second)
+	} else {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	const reads = 5
+	start := ts.Config.RpcTotal()
+	for i := 0; i < reads; i++ {
+		if _, _, err := ck.Get("lease"); err != rpc.OK {
+			t.Fatalf("Get failed: %v", err)
+		}
+	}
+	return ts.Config.RpcTotal() - start
+}
+
+func countGetRPCs(ts *Test, ck kvtest.IKVClerk, key string) int {
+	start := ts.Config.RpcTotal()
+	if _, _, err := ck.Get(key); err != rpc.OK {
+		ts.t.Fatalf("Get failed: %v", err)
+	}
+	return ts.Config.RpcTotal() - start
+}
+
+func setLeaseFlag(enabled bool) func() {
+	prev := featureflag.EnableKVFastLeaseGet
+	featureflag.EnableKVFastLeaseGet = enabled
+	return func() {
+		featureflag.EnableKVFastLeaseGet = prev
+	}
+}
+
+func waitForLease(t *testing.T, ts *Test, timeout time.Duration) (int, raftapi.Raft) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if idx, rf, ok := findLeader(ts); ok && rf.HasLease() {
+			return idx, rf
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for leader lease")
+	return -1, nil
+}
+
+func waitForSpecificLease(t *testing.T, ts *Test, index int, timeout time.Duration) {
+	if !waitForLeaseState(t, ts, index, true, timeout) {
+		t.Fatalf("timeout waiting for server %d lease", index)
+	}
+}
+
+func waitForLeaseState(t *testing.T, ts *Test, index int, expect bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		rf := getRaftAt(ts, index)
+		if rf != nil {
+			if _, isLeader := rf.GetState(); isLeader {
+				if rf.HasLease() == expect {
+					return true
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func waitForLeaderChange(t *testing.T, ts *Test, old int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		services := ts.Group(Gid).Services()
+		for idx, svcs := range services {
+			if idx == old {
+				continue
+			}
+			for _, svc := range svcs {
+				if rf, ok := svc.(raftapi.Raft); ok {
+					if _, isLeader := rf.GetState(); isLeader {
+						return idx
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for new leader (old %d)", old)
+	return -1
+}
+
+func findLeader(ts *Test) (int, raftapi.Raft, bool) {
+	services := ts.Group(Gid).Services()
+	for idx, svcs := range services {
+		for _, svc := range svcs {
+			if rf, ok := svc.(raftapi.Raft); ok {
+				if _, isLeader := rf.GetState(); isLeader {
+					return idx, rf, true
+				}
+			}
+		}
+	}
+	return -1, nil, false
+}
+
+func getRaftAt(ts *Test, index int) raftapi.Raft {
+	services := ts.Group(Gid).Services()
+	if index < 0 || index >= len(services) {
+		return nil
+	}
+	for _, svc := range services[index] {
+		if rf, ok := svc.(raftapi.Raft); ok {
+			return rf
+		}
+	}
+	return nil
 }

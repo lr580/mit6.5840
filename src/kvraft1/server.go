@@ -2,12 +2,15 @@ package kvraft
 
 import (
 	"bytes"
+	"sync"
 	"sync/atomic"
 
+	"6.5840/featureflag"
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/raftapi"
 	tester "6.5840/tester1"
 )
 
@@ -35,14 +38,14 @@ type KVServer struct {
 	rsm  *rsm.RSM
 
 	// Your definitions here.
-	// mu sync.Mutex
-	table   map[string]ValueVer
-	results map[int64]LastResult
+	mu             sync.Mutex
+	table          map[string]ValueVer
+	results        map[int64]LastResult
+	raft           raftapi.Raft
+	fastLeaseReads bool
 }
 
 func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
-	// kv.mu.Lock()
-	// defer kv.mu.Unlock()
 	valueVer, ok := kv.table[args.Key]
 	var reply rpc.GetReply
 	if !ok {
@@ -56,8 +59,6 @@ func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
 }
 
 func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
-	// kv.mu.Lock()
-	// defer kv.mu.Unlock()
 	valueVer, ok := kv.table[args.Key]
 	var reply rpc.PutReply
 	if !ok {
@@ -84,6 +85,8 @@ func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 // https://go.dev/tour/methods/16
 // https://go.dev/tour/methods/15
 func (kv *KVServer) DoOp(req any) any {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	var (
 		clientId, requestId int64
 		hasIdent            bool
@@ -140,8 +143,8 @@ func (kv *KVServer) DoOp(req any) any {
 }
 
 func (kv *KVServer) Snapshot() []byte {
-	// kv.mu.Lock()
-	// defer kv.mu.Unlock()
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -159,8 +162,8 @@ func (kv *KVServer) Restore(data []byte) {
 		return
 	}
 
-	// kv.mu.Lock()
-	// defer kv.mu.Unlock()
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
@@ -177,6 +180,34 @@ func (kv *KVServer) Restore(data []byte) {
 	} else {
 		kv.results = make(map[int64]LastResult)
 	}
+}
+
+func (kv *KVServer) tryLeaseGet(args *rpc.GetArgs, reply *rpc.GetReply) bool {
+	if args == nil || !kv.fastLeaseReads || kv.raft == nil {
+		return false
+	}
+	// if !kv.raft.HasLease() {
+	// 	return false
+	// }
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if !kv.raft.HasLease() {
+		return false
+	}
+	clientId, requestId := args.IDs()
+	if res, exists := kv.results[clientId]; exists && requestId <= res.RequestId {
+		switch res.ReplyType {
+		case replyGet:
+			*reply = res.GetReply
+			return true
+		default:
+			return false
+		}
+	}
+	result := kv.doGet(*args)
+	*reply = result
+	kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyGet, GetReply: result}
+	return true
 }
 
 func (kv *KVServer) doSubmit(req any, reply any) {
@@ -212,6 +243,9 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
 	if args == nil {
 		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	if kv.tryLeaseGet(args, reply) {
 		return
 	}
 	kv.doSubmit(*args, reply)
@@ -259,9 +293,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(LastResult{})
 
 	kv := &KVServer{
-		me:      me,
-		table:   make(map[string]ValueVer),
-		results: make(map[int64]LastResult),
+		me:             me,
+		table:          make(map[string]ValueVer),
+		results:        make(map[int64]LastResult),
+		fastLeaseReads: featureflag.EnableKVFastLeaseGet,
 	}
 
 	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
@@ -269,6 +304,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	}
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
+	kv.raft = kv.rsm.Raft()
 	// You may need initialization code here.
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
