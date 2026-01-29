@@ -50,3 +50,20 @@ type GetReply struct {
 	Version Tversion
 	Err     Err
 }
+
+type RangeArgs struct {
+	Low  string
+	High string
+	Identity
+}
+
+type KeyValue struct {
+	Key     string
+	Value   string
+	Version Tversion
+}
+
+type RangeReply struct {
+	Err Err
+	KVs []KeyValue
+}

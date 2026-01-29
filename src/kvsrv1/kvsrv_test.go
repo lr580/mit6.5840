@@ -165,3 +165,44 @@ func TestUnreliableNet(t *testing.T) {
 
 	ts.CheckPorcupine()
 }
+
+func TestRangeSorted5D(t *testing.T) {
+	if !featureflag.EnableKVRange {
+		t.Skip("Range feature disabled")
+	}
+
+	kv := MakeRangeKVServer()
+	inputs := []struct {
+		key string
+		val string
+	}{
+		{"k3", "v3"},
+		{"k1", "v1"},
+		{"k2", "v2"},
+	}
+	for _, in := range inputs {
+		args := &rpc.PutArgs{Key: in.key, Value: in.val, Version: 0}
+		var reply rpc.PutReply
+		kv.Put(args, &reply)
+		if reply.Err != rpc.OK && reply.Err != rpc.ErrVersion {
+			t.Fatalf("Put %s err %v", in.key, reply.Err)
+		}
+	}
+
+	args := &rpc.RangeArgs{Low: "k1", High: "k3"}
+	var reply rpc.RangeReply
+	kv.Range(args, &reply)
+	if reply.Err != rpc.OK {
+		t.Fatalf("Range err %v", reply.Err)
+	}
+
+	expectKeys := []string{"k1", "k2", "k3"}
+	if len(reply.KVs) != len(expectKeys) {
+		t.Fatalf("expected %d keys, got %d", len(expectKeys), len(reply.KVs))
+	}
+	for i, key := range expectKeys {
+		if reply.KVs[i].Key != key {
+			t.Fatalf("expected key %s at %d, got %s", key, i, reply.KVs[i].Key)
+		}
+	}
+}

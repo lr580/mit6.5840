@@ -13,16 +13,23 @@ import (
 type Clerk struct {
 	clnt      *tester.Clnt
 	server    string
+	svc       string
 	clientId  int64
 	requestId int64
 }
 
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, server: server}
+	ck := &Clerk{clnt: clnt, server: server, svc: "KVServer"}
 	if featureflag.EnableKVExactOnce {
 		ck.clientId = rand.Int63()
 		ck.requestId = 1
 	}
+	return ck
+}
+
+func MakeClerkWithService(clnt *tester.Clnt, server string, svc string) *Clerk {
+	ck := MakeClerk(clnt, server).(*Clerk)
+	ck.svc = svc
 	return ck
 }
 
@@ -52,7 +59,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	}
 	reply := rpc.GetReply{}
 	for {
-		ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+		ok := ck.clnt.Call(ck.server, ck.svc+".Get", &args, &reply)
 		if ok {
 			return reply.Value, reply.Version, reply.Err
 		}
@@ -89,12 +96,27 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 		return reply.Err
 	}
 	for {
-		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+		ok := ck.clnt.Call(ck.server, ck.svc+".Put", &args, &reply)
 		if ok {
 			if reply.Err == rpc.ErrVersion {
 				return rpc.ErrMaybe
 			}
 			return reply.Err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) Range(low, high string) ([]rpc.KeyValue, rpc.Err) {
+	args := rpc.RangeArgs{Low: low, High: high}
+	if featureflag.EnableKVExactOnce {
+		args.Identity = ck.nextIdentity()
+	}
+	reply := rpc.RangeReply{}
+	for {
+		ok := ck.clnt.Call(ck.server, ck.svc+".Range", &args, &reply)
+		if ok {
+			return reply.KVs, reply.Err
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
