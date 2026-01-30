@@ -533,6 +533,109 @@ func TestLeaseWaitsAfterTermSwitch(t *testing.T) {
 	}
 }
 
+func TestTxnConditionalPut5D(t *testing.T) {
+	restoreTxn := setTxnFlag(true)
+	defer restoreTxn()
+
+	ts := MakeTest(t, "5D txn conditional", 1, 3, true, false, false, -1, false)
+	tester.AnnotateTest("TestTxnConditionalPut5D", ts.nservers)
+	defer ts.Cleanup()
+
+	ckIface := ts.MakeClerk()
+	defer ts.DeleteClerk(ckIface)
+	ck := unwrapKvraftClerk(ckIface)
+	if ck == nil {
+		t.Fatalf("failed to unwrap kvraft clerk")
+	}
+
+	reply := ck.Txn(
+		[]rpc.TxnCompare{{Key: "alpha", Version: 0}},
+		[]rpc.TxnOp{{Type: rpc.TxnOpPut, Key: "alpha", Value: "v1"}},
+		nil,
+	)
+	if reply.Err != rpc.OK || !reply.Succeeded {
+		t.Fatalf("expected txn success err=%v succeeded=%v", reply.Err, reply.Succeeded)
+	}
+	if val, _, err := ck.Get("alpha"); err != rpc.OK || val != "v1" {
+		t.Fatalf("expected alpha=v1 got (%v,%v)", val, err)
+	}
+
+	reply = ck.Txn(
+		[]rpc.TxnCompare{{Key: "alpha", Version: 0}},
+		[]rpc.TxnOp{{Type: rpc.TxnOpPut, Key: "alpha", Value: "v2"}},
+		[]rpc.TxnOp{{Type: rpc.TxnOpPut, Key: "beta", Value: "fallback"}},
+	)
+	if reply.Err != rpc.OK || reply.Succeeded {
+		t.Fatalf("expected txn failure err=%v succeeded=%v", reply.Err, reply.Succeeded)
+	}
+	if val, _, err := ck.Get("alpha"); err != rpc.OK || val != "v1" {
+		t.Fatalf("alpha changed on failed txn, val=%v err=%v", val, err)
+	}
+	if val, _, err := ck.Get("beta"); err != rpc.OK || val != "fallback" {
+		t.Fatalf("failure branch not executed val=%v err=%v", val, err)
+	}
+}
+
+func TestTxnMultiOps5D(t *testing.T) {
+	restoreTxn := setTxnFlag(true)
+	defer restoreTxn()
+
+	ts := MakeTest(t, "5D txn multi ops", 1, 3, true, false, false, -1, false)
+	tester.AnnotateTest("TestTxnMultiOps5D", ts.nservers)
+	defer ts.Cleanup()
+
+	ckIface := ts.MakeClerk()
+	defer ts.DeleteClerk(ckIface)
+	ck := unwrapKvraftClerk(ckIface)
+	if ck == nil {
+		t.Fatalf("failed to unwrap kvraft clerk")
+	}
+
+	reply := ck.Txn(nil, []rpc.TxnOp{
+		{Type: rpc.TxnOpPut, Key: "a", Value: "va1"},
+		{Type: rpc.TxnOpPut, Key: "b", Value: "vb1"},
+		{Type: rpc.TxnOpGet, Key: "a"},
+		{Type: rpc.TxnOpGet, Key: "b"},
+	}, nil)
+	if reply.Err != rpc.OK || !reply.Succeeded || len(reply.Results) != 4 {
+		t.Fatalf("unexpected txn reply %+v", reply)
+	}
+	if reply.Results[2].Get.Value != "va1" || reply.Results[3].Get.Value != "vb1" {
+		t.Fatalf("txn get results incorrect: %+v", reply.Results)
+	}
+
+	valA, verA, err := ck.Get("a")
+	if err != rpc.OK || valA != "va1" {
+		t.Fatalf("Get(a) unexpected (%v,%v)", valA, err)
+	}
+	valB, verB, err := ck.Get("b")
+	if err != rpc.OK || valB != "vb1" {
+		t.Fatalf("Get(b) unexpected (%v,%v)", valB, err)
+	}
+
+	reply = ck.Txn(
+		[]rpc.TxnCompare{
+			{Key: "a", Version: verA},
+			{Key: "b", Version: verB},
+		},
+		[]rpc.TxnOp{
+			{Type: rpc.TxnOpPut, Key: "a", Value: "va2"},
+			{Type: rpc.TxnOpPut, Key: "b", Value: "vb2"},
+		},
+		nil,
+	)
+	if reply.Err != rpc.OK || !reply.Succeeded {
+		t.Fatalf("expected compare txn success: %+v", reply)
+	}
+
+	if valA, _, err = ck.Get("a"); err != rpc.OK || valA != "va2" {
+		t.Fatalf("Get(a) after txn unexpected (%v,%v)", valA, err)
+	}
+	if valB, _, err = ck.Get("b"); err != rpc.OK || valB != "vb2" {
+		t.Fatalf("Get(b) after txn unexpected (%v,%v)", valB, err)
+	}
+}
+
 func measureLeaseRPCs(t *testing.T, enabled bool) int {
 	restore := setLeaseFlag(enabled)
 	defer restore()
@@ -577,6 +680,26 @@ func setLeaseFlag(enabled bool) func() {
 	return func() {
 		featureflag.EnableKVFastLeaseGet = prev
 	}
+}
+
+func setTxnFlag(enabled bool) func() {
+	prev := featureflag.EnableKVTransactions
+	featureflag.EnableKVTransactions = enabled
+	return func() {
+		featureflag.EnableKVTransactions = prev
+	}
+}
+
+func unwrapKvraftClerk(ck kvtest.IKVClerk) *Clerk {
+	if tck, ok := ck.(*kvtest.TestClerk); ok {
+		if inner, ok := tck.IKVClerk.(*Clerk); ok {
+			return inner
+		}
+	}
+	if inner, ok := ck.(*Clerk); ok {
+		return inner
+	}
+	return nil
 }
 
 func waitForLease(t *testing.T, ts *Test, timeout time.Duration) (int, raftapi.Raft) {

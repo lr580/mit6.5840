@@ -13,3 +13,9 @@ var EnableKVRange = false
 
 // EnableKVFastLeaseGet 控制 kvraft 只读 lease 优化及相关测试。
 var EnableKVFastLeaseGet = true
+
+// EnableKVTransactions 控制 kvraft 事务扩展和相关测试。
+var EnableKVTransactions = false
+
+// EnableShardTransactions 控制 shardkv 跨分片事务扩展和相关测试。
+var EnableShardTransactions = false

@@ -4,9 +4,11 @@ type Err string
 
 const (
 	// Err's returned by server and Clerk
-	OK         = "OK"
-	ErrNoKey   = "ErrNoKey"
-	ErrVersion = "ErrVersion"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrVersion     = "ErrVersion"
+	ErrTxnDisabled = "ErrTxnDisabled"
+	ErrTxnConflict = "ErrTxnConflict"
 
 	// Err returned by Clerk only
 	ErrMaybe = "ErrMaybe"
@@ -66,4 +68,41 @@ type KeyValue struct {
 type RangeReply struct {
 	Err Err
 	KVs []KeyValue
+}
+
+type TxnOpType uint8
+
+const (
+	TxnOpGet TxnOpType = iota
+	TxnOpPut
+)
+
+type TxnCompare struct {
+	Key     string
+	Version Tversion
+}
+
+type TxnOp struct {
+	Type  TxnOpType
+	Key   string
+	Value string
+}
+
+type TxnArgs struct {
+	Identity
+	Compare []TxnCompare
+	Success []TxnOp
+	Failure []TxnOp
+}
+
+type TxnOpResult struct {
+	Type TxnOpType
+	Get  GetReply
+	Put  PutReply
+}
+
+type TxnReply struct {
+	Err       Err
+	Succeeded bool
+	Results   []TxnOpResult
 }

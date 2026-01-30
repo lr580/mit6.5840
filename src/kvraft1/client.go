@@ -115,3 +115,27 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	}
 	// return ""
 }
+
+func (ck *Clerk) Txn(compare []rpc.TxnCompare, success []rpc.TxnOp, failure []rpc.TxnOp) rpc.TxnReply {
+	args := rpc.TxnArgs{
+		Compare:  compare,
+		Success:  success,
+		Failure:  failure,
+		Identity: rpc.Identity{ClientId: ck.clientId, RequestId: ck.requestId},
+	}
+	ck.requestId++
+
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := rpc.TxnReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.Txn", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			ck.leader = server
+			return reply
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

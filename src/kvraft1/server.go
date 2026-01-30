@@ -24,12 +24,14 @@ type LastResult struct {
 	ReplyType byte
 	GetReply  rpc.GetReply
 	PutReply  rpc.PutReply
+	TxnReply  rpc.TxnReply
 }
 
 const (
 	replyNone byte = iota
 	replyGet
 	replyPut
+	replyTxn
 )
 
 type KVServer struct {
@@ -43,6 +45,7 @@ type KVServer struct {
 	results        map[int64]LastResult
 	raft           raftapi.Raft
 	fastLeaseReads bool
+	txnEnabled     bool
 }
 
 func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
@@ -79,6 +82,65 @@ func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 	return reply
 }
 
+func (kv *KVServer) doTxn(args rpc.TxnArgs) rpc.TxnReply {
+	if !kv.txnEnabled {
+		return rpc.TxnReply{Err: rpc.ErrTxnDisabled}
+	}
+
+	success := true
+	for _, cmp := range args.Compare {
+		if valueVer, ok := kv.table[cmp.Key]; ok {
+			if valueVer.Version != cmp.Version {
+				success = false
+				break
+			}
+		} else {
+			if cmp.Version != rpc.Tversion(0) {
+				success = false
+				break
+			}
+		}
+	}
+
+	var ops []rpc.TxnOp
+	if success {
+		ops = args.Success
+	} else {
+		ops = args.Failure
+	}
+	results := make([]rpc.TxnOpResult, 0, len(ops))
+	for _, op := range ops {
+		switch op.Type {
+		case rpc.TxnOpGet:
+			var get rpc.GetReply
+			if valueVer, ok := kv.table[op.Key]; ok {
+				get.Err = rpc.OK
+				get.Value = valueVer.Value
+				get.Version = valueVer.Version
+			} else {
+				get.Err = rpc.ErrNoKey
+			}
+			results = append(results, rpc.TxnOpResult{Type: rpc.TxnOpGet, Get: get})
+		case rpc.TxnOpPut:
+			valueVer, ok := kv.table[op.Key]
+			var newVersion rpc.Tversion = 1
+			if ok {
+				newVersion = valueVer.Version + 1
+			}
+			kv.table[op.Key] = ValueVer{Value: op.Value, Version: newVersion}
+			results = append(results, rpc.TxnOpResult{Type: rpc.TxnOpPut, Put: rpc.PutReply{Err: rpc.OK}})
+		default:
+			results = append(results, rpc.TxnOpResult{Type: op.Type, Put: rpc.PutReply{Err: rpc.ErrWrongLeader}})
+		}
+	}
+
+	return rpc.TxnReply{
+		Err:       rpc.OK,
+		Succeeded: success,
+		Results:   results,
+	}
+}
+
 // To type-cast req to the right type, take a look at Go's type switches or type
 // assertions below:
 //
@@ -100,6 +162,8 @@ func (kv *KVServer) DoOp(req any) any {
 				return res.GetReply
 			case replyPut:
 				return res.PutReply
+			case replyTxn:
+				return res.TxnReply
 			default:
 				return nil
 			}
@@ -126,6 +190,12 @@ func (kv *KVServer) DoOp(req any) any {
 		reply := kv.doPut(args)
 		if hasIdent {
 			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply}
+		}
+		return reply
+	case rpc.TxnArgs:
+		reply := kv.doTxn(args)
+		if hasIdent {
+			kv.results[clientId] = LastResult{RequestId: requestId, ReplyType: replyTxn, TxnReply: reply}
 		}
 		return reply
 	// case *rpc.PutArgs:
@@ -234,6 +304,16 @@ func (kv *KVServer) doSubmit(req any, reply any) {
 		} else {
 			out.Err = rpc.ErrWrongLeader //panic maybe
 		}
+	case *rpc.TxnReply:
+		if err != rpc.OK {
+			out.Err = err
+			return
+		}
+		if v, ok := result.(rpc.TxnReply); ok {
+			*out = v
+		} else {
+			out.Err = rpc.ErrWrongLeader
+		}
 	}
 }
 
@@ -257,6 +337,18 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
 	if args == nil {
 		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	kv.doSubmit(*args, reply)
+}
+
+func (kv *KVServer) Txn(args *rpc.TxnArgs, reply *rpc.TxnReply) {
+	if args == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	if !kv.txnEnabled {
+		reply.Err = rpc.ErrTxnDisabled
 		return
 	}
 	kv.doSubmit(*args, reply)
@@ -291,12 +383,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rpc.PutReply{})
 	labgob.Register(rpc.GetReply{})
 	labgob.Register(LastResult{})
+	labgob.Register(rpc.TxnArgs{})
+	labgob.Register(rpc.TxnReply{})
+	labgob.Register(rpc.TxnOp{})
+	labgob.Register(rpc.TxnOpResult{})
+	labgob.Register(rpc.TxnCompare{})
 
 	kv := &KVServer{
 		me:             me,
 		table:          make(map[string]ValueVer),
 		results:        make(map[int64]LastResult),
 		fastLeaseReads: featureflag.EnableKVFastLeaseGet,
+		txnEnabled:     featureflag.EnableKVTransactions,
 	}
 
 	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
