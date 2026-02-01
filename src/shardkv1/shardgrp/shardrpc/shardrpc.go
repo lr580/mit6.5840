@@ -37,3 +37,45 @@ type DeleteShardArgs struct {
 type DeleteShardReply struct {
 	Err rpc.Err
 }
+
+type TxnId struct {
+	ClientId  int64
+	RequestId int64
+}
+
+type TxnPrepareArgs struct {
+	Shard    shardcfg.Tshid
+	TxnId    TxnId
+	Compare  []rpc.TxnCompare
+	Success  []rpc.TxnOp
+	Failure  []rpc.TxnOp
+	Identity rpc.Identity
+}
+
+type TxnPrepareReply struct {
+	Err       rpc.Err
+	Prepared  bool
+	CompareOK bool
+}
+
+type TxnCommitArgs struct {
+	Shard     shardcfg.Tshid
+	TxnId     TxnId
+	Succeeded bool
+	Identity  rpc.Identity
+}
+
+type TxnCommitReply struct {
+	Err     rpc.Err
+	Results []rpc.TxnOpResult
+}
+
+type TxnAbortArgs struct {
+	Shard    shardcfg.Tshid
+	TxnId    TxnId
+	Identity rpc.Identity
+}
+
+type TxnAbortReply struct {
+	Err rpc.Err
+}

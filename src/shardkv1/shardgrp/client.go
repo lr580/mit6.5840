@@ -196,3 +196,54 @@ func (ck *Clerk) nextIdentity() rpc.Identity {
 	ck.requestId++
 	return id
 }
+
+func (ck *Clerk) TxnPrepare(args *shardrpc.TxnPrepareArgs) shardrpc.TxnPrepareReply {
+	args.Identity = ck.nextIdentity()
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := shardrpc.TxnPrepareReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.TxnPrepare", args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			ck.leader = server
+			return reply
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) TxnCommit(args *shardrpc.TxnCommitArgs) shardrpc.TxnCommitReply {
+	args.Identity = ck.nextIdentity()
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := shardrpc.TxnCommitReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.TxnCommit", args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			ck.leader = server
+			return reply
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) TxnAbort(args *shardrpc.TxnAbortArgs) shardrpc.TxnAbortReply {
+	args.Identity = ck.nextIdentity()
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.leader + i) % len(ck.servers)
+			reply := shardrpc.TxnAbortReply{}
+			ok := ck.clnt.Call(ck.servers[server], "KVServer.TxnAbort", args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
+			ck.leader = server
+			return reply
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

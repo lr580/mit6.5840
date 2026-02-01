@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"6.5840/featureflag"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
@@ -227,6 +228,115 @@ func TestJoinLeaveBasic5A(t *testing.T) {
 	}
 
 	ts.checkShutdownSharding(gid2, ka, va)
+}
+
+func TestTxnAcrossShards5D(t *testing.T) {
+	restore := setShardTxnFlag(true)
+	defer restore()
+
+	ts := MakeTest(t, "Test (5D): txn across shards ...", true)
+	defer ts.Cleanup()
+
+	gid1 := ts.setupKVService()
+	sck := ts.ShardCtrler()
+	gid2 := ts.newGid()
+	if ok := ts.joinGroups(sck, []tester.Tgid{gid2}); !ok {
+		ts.t.Fatalf("TestTxnAcrossShards5D: joinGroups failed")
+	}
+
+	ckIface := ts.MakeClerk()
+	defer ts.DeleteClerk(ckIface)
+	ck := unwrapShardkvClerk(ckIface)
+	if ck == nil {
+		ts.t.Fatalf("TestTxnAcrossShards5D: unwrap clerk failed")
+	}
+
+	cfg := sck.Query()
+	keyA, keyB := findKeysInDifferentGroups(cfg)
+	if keyA == "" || keyB == "" {
+		ts.t.Fatalf("TestTxnAcrossShards5D: failed to find keys")
+	}
+
+	reply := ck.Txn(
+		[]rpc.TxnCompare{
+			{Key: keyA, Version: 0},
+			{Key: keyB, Version: 0},
+		},
+		[]rpc.TxnOp{
+			{Type: rpc.TxnOpPut, Key: keyA, Value: "va"},
+			{Type: rpc.TxnOpPut, Key: keyB, Value: "vb"},
+		},
+		[]rpc.TxnOp{
+			{Type: rpc.TxnOpPut, Key: keyA, Value: "fa"},
+		},
+	)
+	if reply.Err != rpc.OK || !reply.Succeeded {
+		ts.t.Fatalf("TestTxnAcrossShards5D: expected success err=%v succeeded=%v", reply.Err, reply.Succeeded)
+	}
+	ts.CheckGet(ckIface, keyA, "va", rpc.Tversion(1))
+	ts.CheckGet(ckIface, keyB, "vb", rpc.Tversion(1))
+
+	reply = ck.Txn(
+		[]rpc.TxnCompare{
+			{Key: keyA, Version: 0},
+		},
+		[]rpc.TxnOp{
+			{Type: rpc.TxnOpPut, Key: keyA, Value: "va2"},
+			{Type: rpc.TxnOpPut, Key: keyB, Value: "vb2"},
+		},
+		[]rpc.TxnOp{
+			{Type: rpc.TxnOpPut, Key: keyB, Value: "fb"},
+		},
+	)
+	if reply.Err != rpc.OK || reply.Succeeded {
+		ts.t.Fatalf("TestTxnAcrossShards5D: expected failure err=%v succeeded=%v", reply.Err, reply.Succeeded)
+	}
+	ts.CheckGet(ckIface, keyA, "va", rpc.Tversion(1))
+	ts.CheckGet(ckIface, keyB, "fb", rpc.Tversion(2))
+
+	_ = gid1
+}
+
+func setShardTxnFlag(enabled bool) func() {
+	prev := featureflag.EnableShardTransactions
+	featureflag.EnableShardTransactions = enabled
+	return func() {
+		featureflag.EnableShardTransactions = prev
+	}
+}
+
+func unwrapShardkvClerk(ck kvtest.IKVClerk) *Clerk {
+	if tck, ok := ck.(*kvtest.TestClerk); ok {
+		if inner, ok := tck.IKVClerk.(*Clerk); ok {
+			return inner
+		}
+	}
+	if inner, ok := ck.(*Clerk); ok {
+		return inner
+	}
+	return nil
+}
+
+func findKeysInDifferentGroups(cfg *shardcfg.ShardConfig) (string, string) {
+	keyA := ""
+	keyB := ""
+	for i := 0; i < 1000; i++ {
+		a := "ta" + tester.Randstring(8) + string(rune('a'+(i%26)))
+		b := "tb" + tester.Randstring(8) + string(rune('a'+((i+7)%26)))
+		shardA := shardcfg.Key2Shard(a)
+		shardB := shardcfg.Key2Shard(b)
+		gidA, _, okA := cfg.GidServers(shardA)
+		gidB, _, okB := cfg.GidServers(shardB)
+		if !okA || !okB || gidA == 0 || gidB == 0 {
+			continue
+		}
+		if gidA != gidB {
+			keyA = a
+			keyB = b
+			break
+		}
+	}
+	return keyA, keyB
 }
 
 // test many groups joining and leaving, reliable or unreliable

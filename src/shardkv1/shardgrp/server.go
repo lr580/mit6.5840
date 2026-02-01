@@ -2,8 +2,10 @@ package shardgrp
 
 import (
 	"bytes"
+	"sort"
 	"sync/atomic"
 
+	"6.5840/featureflag"
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
@@ -26,6 +28,9 @@ type LastResult struct {
 	FreezeReply  shardrpc.FreezeShardReply
 	InstallReply shardrpc.InstallShardReply
 	DeleteReply  shardrpc.DeleteShardReply
+	PrepareReply shardrpc.TxnPrepareReply
+	CommitReply  shardrpc.TxnCommitReply
+	AbortReply   shardrpc.TxnAbortReply
 }
 
 const ( //reply type
@@ -35,6 +40,9 @@ const ( //reply type
 	replyFreeze
 	replyInstall
 	replyDelete
+	replyPrepare
+	replyCommit
+	replyAbort
 )
 
 type ShardState struct {
@@ -42,6 +50,16 @@ type ShardState struct {
 	Frozen  bool
 	Data    map[string]ValueVer
 	Results map[int64]LastResult
+	Locks   map[string]shardrpc.TxnId
+	Pending map[shardrpc.TxnId]*pendingTxn
+}
+
+type pendingTxn struct {
+	Keys      []string
+	Success   []rpc.TxnOp
+	Failure   []rpc.TxnOp
+	CompareOK bool
+	Prepared  bool
 }
 
 type shardSnapshot struct {
@@ -55,6 +73,8 @@ func makeShardState(num shardcfg.Tnum, frozen bool) *ShardState {
 		Frozen:  frozen,
 		Data:    make(map[string]ValueVer),
 		Results: make(map[int64]LastResult),
+		Locks:   make(map[string]shardrpc.TxnId),
+		Pending: make(map[shardrpc.TxnId]*pendingTxn),
 	}
 }
 
@@ -70,6 +90,12 @@ func (lr LastResult) toResult() any {
 		return lr.InstallReply
 	case replyDelete:
 		return lr.DeleteReply
+	case replyPrepare:
+		return lr.PrepareReply
+	case replyCommit:
+		return lr.CommitReply
+	case replyAbort:
+		return lr.AbortReply
 	default:
 		return nil
 	}
@@ -141,11 +167,12 @@ func decodeSnapshot(data []byte) (shardSnapshot, rpc.Err) {
 }
 
 type KVServer struct {
-	me     int
-	dead   int32 // set by Kill()
-	rsm    *rsm.RSM
-	gid    tester.Tgid
-	shards map[shardcfg.Tshid]*ShardState
+	me         int
+	dead       int32 // set by Kill()
+	rsm        *rsm.RSM
+	gid        tester.Tgid
+	shards     map[shardcfg.Tshid]*ShardState
+	txnEnabled bool
 }
 
 func (kv *KVServer) doGet(st *ShardState, args rpc.GetArgs) rpc.GetReply {
@@ -182,6 +209,190 @@ func (kv *KVServer) doPut(st *ShardState, args rpc.PutArgs) rpc.PutReply {
 	return reply
 }
 
+func (st *ShardState) ensureTxn() {
+	if st.Locks == nil {
+		st.Locks = make(map[string]shardrpc.TxnId)
+	}
+	if st.Pending == nil {
+		st.Pending = make(map[shardrpc.TxnId]*pendingTxn)
+	}
+}
+
+func uniqueKeys(keys []string) []string {
+	set := make(map[string]struct{}, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, ok := set[k]; ok {
+			continue
+		}
+		set[k] = struct{}{}
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (st *ShardState) lockKeys(txnId shardrpc.TxnId, keys []string) bool {
+	st.ensureTxn()
+	locked := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if owner, ok := st.Locks[key]; ok && owner != txnId {
+			for _, lk := range locked {
+				delete(st.Locks, lk)
+			}
+			return false
+		}
+		st.Locks[key] = txnId
+		locked = append(locked, key)
+	}
+	return true
+}
+
+func (st *ShardState) unlockKeys(txnId shardrpc.TxnId, keys []string) {
+	if st.Locks == nil {
+		return
+	}
+	for _, key := range keys {
+		if owner, ok := st.Locks[key]; ok && owner == txnId {
+			delete(st.Locks, key)
+		}
+	}
+}
+
+func (kv *KVServer) doTxnPrepare(st *ShardState, args shardrpc.TxnPrepareArgs) shardrpc.TxnPrepareReply {
+	var reply shardrpc.TxnPrepareReply
+	if !kv.txnEnabled {
+		reply.Err = rpc.ErrTxnDisabled
+		return reply
+	}
+	if st == nil || st.Frozen {
+		reply.Err = rpc.ErrWrongGroup
+		return reply
+	}
+	st.ensureTxn()
+	if pending, ok := st.Pending[args.TxnId]; ok && pending.Prepared {
+		reply.Err = rpc.OK
+		reply.Prepared = true
+		reply.CompareOK = pending.CompareOK
+		return reply
+	}
+
+	keys := make([]string, 0, len(args.Compare)+len(args.Success)+len(args.Failure))
+	for _, cmp := range args.Compare {
+		keys = append(keys, cmp.Key)
+	}
+	for _, op := range args.Success {
+		keys = append(keys, op.Key)
+	}
+	for _, op := range args.Failure {
+		keys = append(keys, op.Key)
+	}
+	keys = uniqueKeys(keys)
+	if !st.lockKeys(args.TxnId, keys) {
+		reply.Err = rpc.ErrTxnConflict
+		return reply
+	}
+
+	compareOK := true
+	for _, cmp := range args.Compare {
+		if valueVer, ok := st.Data[cmp.Key]; ok {
+			if valueVer.Version != cmp.Version {
+				compareOK = false
+				break
+			}
+		} else {
+			if cmp.Version != rpc.Tversion(0) {
+				compareOK = false
+				break
+			}
+		}
+	}
+
+	st.Pending[args.TxnId] = &pendingTxn{
+		Keys:      keys,
+		Success:   args.Success,
+		Failure:   args.Failure,
+		CompareOK: compareOK,
+		Prepared:  true,
+	}
+	reply.Err = rpc.OK
+	reply.Prepared = true
+	reply.CompareOK = compareOK
+	return reply
+}
+
+func (kv *KVServer) doTxnCommit(st *ShardState, args shardrpc.TxnCommitArgs) shardrpc.TxnCommitReply {
+	var reply shardrpc.TxnCommitReply
+	if !kv.txnEnabled {
+		reply.Err = rpc.ErrTxnDisabled
+		return reply
+	}
+	if st == nil || st.Frozen {
+		reply.Err = rpc.ErrWrongGroup
+		return reply
+	}
+	st.ensureTxn()
+	pending, ok := st.Pending[args.TxnId]
+	if !ok || !pending.Prepared {
+		reply.Err = rpc.ErrTxnConflict
+		return reply
+	}
+	var ops []rpc.TxnOp
+	if args.Succeeded {
+		ops = pending.Success
+	} else {
+		ops = pending.Failure
+	}
+	results := make([]rpc.TxnOpResult, 0, len(ops))
+	for _, op := range ops {
+		switch op.Type {
+		case rpc.TxnOpGet:
+			var get rpc.GetReply
+			if valueVer, ok := st.Data[op.Key]; ok {
+				get.Err = rpc.OK
+				get.Value = valueVer.Value
+				get.Version = valueVer.Version
+			} else {
+				get.Err = rpc.ErrNoKey
+			}
+			results = append(results, rpc.TxnOpResult{Type: rpc.TxnOpGet, Get: get})
+		case rpc.TxnOpPut:
+			valueVer, ok := st.Data[op.Key]
+			var newVersion rpc.Tversion = 1
+			if ok {
+				newVersion = valueVer.Version + 1
+			}
+			st.Data[op.Key] = ValueVer{Value: op.Value, Version: newVersion}
+			results = append(results, rpc.TxnOpResult{Type: rpc.TxnOpPut, Put: rpc.PutReply{Err: rpc.OK}})
+		default:
+			results = append(results, rpc.TxnOpResult{Type: op.Type, Put: rpc.PutReply{Err: rpc.ErrWrongLeader}})
+		}
+	}
+	st.unlockKeys(args.TxnId, pending.Keys)
+	delete(st.Pending, args.TxnId)
+	reply.Err = rpc.OK
+	reply.Results = results
+	return reply
+}
+
+func (kv *KVServer) doTxnAbort(st *ShardState, args shardrpc.TxnAbortArgs) shardrpc.TxnAbortReply {
+	var reply shardrpc.TxnAbortReply
+	if !kv.txnEnabled {
+		reply.Err = rpc.ErrTxnDisabled
+		return reply
+	}
+	if st == nil {
+		reply.Err = rpc.ErrWrongGroup
+		return reply
+	}
+	st.ensureTxn()
+	if pending, ok := st.Pending[args.TxnId]; ok {
+		st.unlockKeys(args.TxnId, pending.Keys)
+		delete(st.Pending, args.TxnId)
+	}
+	reply.Err = rpc.OK
+	return reply
+}
 func (kv *KVServer) doFreezeShard(args shardrpc.FreezeShardArgs) shardrpc.FreezeShardReply {
 	var reply shardrpc.FreezeShardReply
 
@@ -280,6 +491,15 @@ func (kv *KVServer) DoOp(req any) any {
 		if state == nil || state.Frozen {
 			return rpc.PutReply{Err: rpc.ErrWrongGroup}
 		}
+	case shardrpc.TxnPrepareArgs:
+		shardId = args.Shard
+		state, hasShard = kv.shards[shardId]
+	case shardrpc.TxnCommitArgs:
+		shardId = args.Shard
+		state, hasShard = kv.shards[shardId]
+	case shardrpc.TxnAbortArgs:
+		shardId = args.Shard
+		state, hasShard = kv.shards[shardId]
 	case shardrpc.FreezeShardArgs:
 		shardId = args.Shard
 		state, hasShard = kv.shards[shardId]
@@ -308,6 +528,24 @@ func (kv *KVServer) DoOp(req any) any {
 		reply := kv.doPut(state, args)
 		if hasIdent {
 			state.storeResult(clientId, LastResult{RequestId: requestId, ReplyType: replyPut, PutReply: reply})
+		}
+		return reply
+	case shardrpc.TxnPrepareArgs:
+		reply := kv.doTxnPrepare(state, args)
+		if hasIdent && state != nil {
+			state.storeResult(clientId, LastResult{RequestId: requestId, ReplyType: replyPrepare, PrepareReply: reply})
+		}
+		return reply
+	case shardrpc.TxnCommitArgs:
+		reply := kv.doTxnCommit(state, args)
+		if hasIdent && state != nil {
+			state.storeResult(clientId, LastResult{RequestId: requestId, ReplyType: replyCommit, CommitReply: reply})
+		}
+		return reply
+	case shardrpc.TxnAbortArgs:
+		reply := kv.doTxnAbort(state, args)
+		if hasIdent && state != nil {
+			state.storeResult(clientId, LastResult{RequestId: requestId, ReplyType: replyAbort, AbortReply: reply})
 		}
 		return reply
 	case shardrpc.FreezeShardArgs:
@@ -363,6 +601,12 @@ func (kv *KVServer) Restore(data []byte) {
 			}
 			if st.Results == nil {
 				st.Results = make(map[int64]LastResult)
+			}
+			if st.Locks == nil {
+				st.Locks = make(map[string]shardrpc.TxnId)
+			}
+			if st.Pending == nil {
+				st.Pending = make(map[shardrpc.TxnId]*pendingTxn)
 			}
 		}
 		kv.shards = shards
@@ -460,6 +704,57 @@ func (kv *KVServer) DeleteShard(args *shardrpc.DeleteShardArgs, reply *shardrpc.
 	}
 }
 
+func (kv *KVServer) TxnPrepare(args *shardrpc.TxnPrepareArgs, reply *shardrpc.TxnPrepareReply) {
+	if args == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	err, result := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	if v, ok := result.(shardrpc.TxnPrepareReply); ok {
+		*reply = v
+	} else {
+		reply.Err = rpc.ErrWrongLeader
+	}
+}
+
+func (kv *KVServer) TxnCommit(args *shardrpc.TxnCommitArgs, reply *shardrpc.TxnCommitReply) {
+	if args == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	err, result := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	if v, ok := result.(shardrpc.TxnCommitReply); ok {
+		*reply = v
+	} else {
+		reply.Err = rpc.ErrWrongLeader
+	}
+}
+
+func (kv *KVServer) TxnAbort(args *shardrpc.TxnAbortArgs, reply *shardrpc.TxnAbortReply) {
+	if args == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	err, result := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	if v, ok := result.(shardrpc.TxnAbortReply); ok {
+		*reply = v
+	} else {
+		reply.Err = rpc.ErrWrongLeader
+	}
+}
+
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -490,17 +785,28 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.FreezeShardArgs{})
 	labgob.Register(shardrpc.InstallShardArgs{})
 	labgob.Register(shardrpc.DeleteShardArgs{})
+	labgob.Register(shardrpc.TxnPrepareArgs{})
+	labgob.Register(shardrpc.TxnCommitArgs{})
+	labgob.Register(shardrpc.TxnAbortArgs{})
 	labgob.Register(rsm.Op{})
 	labgob.Register(rpc.PutReply{})
 	labgob.Register(rpc.GetReply{})
 	labgob.Register(LastResult{})
 	labgob.Register(ShardState{})
 	labgob.Register(shardSnapshot{})
+	labgob.Register(rpc.TxnOp{})
+	labgob.Register(rpc.TxnOpResult{})
+	labgob.Register(rpc.TxnCompare{})
+	labgob.Register(shardrpc.TxnId{})
+	labgob.Register(shardrpc.TxnPrepareReply{})
+	labgob.Register(shardrpc.TxnCommitReply{})
+	labgob.Register(shardrpc.TxnAbortReply{})
 
 	kv := &KVServer{
-		gid:    gid,
-		me:     me,
-		shards: make(map[shardcfg.Tshid]*ShardState),
+		gid:        gid,
+		me:         me,
+		shards:     make(map[shardcfg.Tshid]*ShardState),
+		txnEnabled: featureflag.EnableShardTransactions,
 	}
 	if gid == shardcfg.Gid1 {
 		for i := 0; i < shardcfg.NShards; i++ {
