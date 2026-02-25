@@ -1,0 +1,82 @@
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.1s #peers 3 #RPCs    51 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.11s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    46 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.99s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    49 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.98s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.1s #peers 3 #RPCs    45 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.12s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.2s #peers 3 #RPCs    47 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.16s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.1s #peers 3 #RPCs    52 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.13s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  1.9s #peers 3 #RPCs    44 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.89s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.2s #peers 3 #RPCs    52 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.20s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    48 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.03s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  1.9s #peers 3 #RPCs    45 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.94s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    50 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.99s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.1s #peers 3 #RPCs    50 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.09s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  1.8s #peers 3 #RPCs    42 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.82s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  1.9s #peers 3 #RPCs    44 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.86s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.2s #peers 3 #RPCs    53 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.22s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.2s #peers 3 #RPCs    54 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.22s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    47 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.99s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  1.8s #peers 3 #RPCs    44 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.80s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.1s #peers 3 #RPCs    48 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.10s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    46 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (2.03s)
+PASS
+ok  	6.5840/kvraft1	40.671s

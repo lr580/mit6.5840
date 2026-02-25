@@ -1,0 +1,121 @@
+lr5802@WIN-F9542K0OAT6:~/mit6.5840/src/kvraft1$ go test -v
+=== RUN   TestKVraftExactOnceDuplicatePut
+Test: one client (Test (5D): kvraft duplicate put) (reliable network)...
+  ... Passed --  time  0.8s #peers 3 #RPCs    65 #Ops    0
+--- PASS: TestKVraftExactOnceDuplicatePut (0.85s)
+=== RUN   TestBasic4B
+Test: one client (4B basic) (reliable network)...
+  ... Passed --  time  3.0s #peers 5 #RPCs  1368 #Ops  429
+--- PASS: TestBasic4B (3.03s)
+=== RUN   TestSpeed4B
+Test: one client (4B speed) (reliable network)...
+  ... Passed --  time 11.3s #peers 3 #RPCs  3034 #Ops    0
+--- PASS: TestSpeed4B (11.26s)
+=== RUN   TestConcurrent4B
+Test: many clients (4B many clients) (reliable network)...
+  ... Passed --  time  3.2s #peers 5 #RPCs  6268 #Ops 1925
+--- PASS: TestConcurrent4B (3.16s)
+=== RUN   TestUnreliable4B
+Test: many clients (4B many clients) (unreliable network)...
+  ... Passed --  time  4.6s #peers 5 #RPCs  1192 #Ops  241
+--- PASS: TestUnreliable4B (4.58s)
+=== RUN   TestOnePartition4B
+Test: one client (4B progress in majority) (unreliable network)...
+  ... Passed --  time  3.6s #peers 5 #RPCs   195 #Ops    3
+Test: no progress in minority (4B) (unreliable network)...
+  ... Passed --  time  1.3s #peers 5 #RPCs    94 #Ops    3
+Test: completion after heal (4B) (unreliable network)...
+  ... Passed --  time  1.2s #peers 5 #RPCs    65 #Ops    4
+--- PASS: TestOnePartition4B (6.08s)
+=== RUN   TestManyPartitionsOneClient4B
+Test: partitions, one client (4B partitions, one client) (reliable network)...
+  ... Passed --  time  9.3s #peers 5 #RPCs  1473 #Ops  409
+--- PASS: TestManyPartitionsOneClient4B (9.33s)
+=== RUN   TestManyPartitionsManyClients4B
+Test: partitions, many clients (4B partitions, many clients (4B)) (reliable network)...
+  ... Passed --  time  9.2s #peers 5 #RPCs  4073 #Ops  941
+--- PASS: TestManyPartitionsManyClients4B (9.20s)
+=== RUN   TestPersistOneClient4B
+Test: restarts, one client (4B restarts, one client 4B ) (reliable network)...
+  ... Passed --  time  6.0s #peers 5 #RPCs   463 #Ops   73
+--- PASS: TestPersistOneClient4B (6.02s)
+=== RUN   TestPersistConcurrent4B
+Test: restarts, many clients (4B restarts, many clients) (reliable network)...
+  ... Passed --  time  6.2s #peers 5 #RPCs  3348 #Ops  713
+--- PASS: TestPersistConcurrent4B (6.16s)
+=== RUN   TestPersistConcurrentUnreliable4B
+Test: restarts, many clients (4B restarts, many clients ) (unreliable network)...
+  ... Passed --  time  8.1s #peers 5 #RPCs  1025 #Ops   99
+--- PASS: TestPersistConcurrentUnreliable4B (8.06s)
+=== RUN   TestPersistPartition4B
+Test: restarts, partitions, many clients (4B restarts, partitions, many clients) (reliable network)...
+  ... Passed --  time 14.6s #peers 5 #RPCs  3156 #Ops  497
+--- PASS: TestPersistPartition4B (14.62s)
+=== RUN   TestPersistPartitionUnreliable4B
+Test: restarts, partitions, many clients (4B restarts, partitions, many clients) (unreliable network)...
+  ... Passed --  time 23.4s #peers 5 #RPCs  1955 #Ops  113
+--- PASS: TestPersistPartitionUnreliable4B (23.35s)
+=== RUN   TestPersistPartitionUnreliableLinearizable4B
+Test: restarts, partitions, random keys, many clients (4B restarts, partitions, random keys, many clients) (unreliable network)...
+  ... Passed --  time 24.3s #peers 7 #RPCs  4946 #Ops  210
+--- PASS: TestPersistPartitionUnreliableLinearizable4B (24.32s)
+=== RUN   TestSnapshotRPC4C
+Test: snapshots, one client (4C SnapshotsRPC) (reliable network)...
+Test: InstallSnapshot RPC (4C) (reliable network)...
+  ... Passed --  time  5.1s #peers 3 #RPCs   289 #Ops   63
+--- PASS: TestSnapshotRPC4C (5.06s)
+=== RUN   TestSnapshotSize4C
+Test: snapshots, one client (4C snapshot size is reasonable) (reliable network)...
+  ... Passed --  time  5.1s #peers 3 #RPCs  1644 #Ops  800
+--- PASS: TestSnapshotSize4C (5.13s)
+=== RUN   TestSpeed4C
+Test: snapshots, one client (4C speed) (reliable network)...
+  ... Passed --  time 11.4s #peers 3 #RPCs  3031 #Ops    0
+--- PASS: TestSpeed4C (11.39s)
+=== RUN   TestSnapshotRecover4C
+Test: restarts, snapshots, one client (4C restarts, snapshots, one client) (reliable network)...
+  ... Passed --  time  6.0s #peers 5 #RPCs   505 #Ops   83
+--- PASS: TestSnapshotRecover4C (6.03s)
+=== RUN   TestSnapshotRecoverManyClients4C
+Test: restarts, snapshots, many clients (4C restarts, snapshots, many clients ) (reliable network)...
+info: linearizability check timed out, assuming history is ok
+info: linearizability check timed out, assuming history is ok
+info: linearizability check timed out, assuming history is ok
+  ... Passed --  time  9.6s #peers 5 #RPCs 10443 #Ops 2055
+--- PASS: TestSnapshotRecoverManyClients4C (9.57s)
+=== RUN   TestSnapshotUnreliable4C
+Test: snapshots, many clients (4C unreliable net, snapshots, many clients) (unreliable network)...
+  ... Passed --  time  5.0s #peers 5 #RPCs  1228 #Ops  243
+--- PASS: TestSnapshotUnreliable4C (4.96s)
+=== RUN   TestSnapshotUnreliableRecover4C
+Test: restarts, snapshots, many clients (4C unreliable net, restarts, snapshots, many clients) (unreliable network)...
+  ... Passed --  time  9.1s #peers 5 #RPCs  1117 #Ops  133
+--- PASS: TestSnapshotUnreliableRecover4C (9.12s)
+=== RUN   TestSnapshotUnreliableRecoverConcurrentPartition4C
+Test: restarts, partitions, snapshots, many clients (4C unreliable net, restarts, partitions, snapshots, many clients) (unreliable network)...
+  ... Passed --  time 12.5s #peers 5 #RPCs   965 #Ops   85
+--- PASS: TestSnapshotUnreliableRecoverConcurrentPartition4C (12.46s)
+=== RUN   TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable4C
+Test: restarts, partitions, snapshots, random keys, many clients (4C unreliable net, restarts, partitions, snapshots, random keys, many clients) (unreliable network)...
+  ... Passed --  time 21.2s #peers 7 #RPCs  7099 #Ops  230
+--- PASS: TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable4C (21.21s)
+=== RUN   TestLeaseFastGetReducesRPCs
+Test: one client (5D lease rpc compare) (reliable network)...
+  ... Passed --  time  0.9s #peers 3 #RPCs    48 #Ops    0
+Test: one client (5D lease rpc compare) (reliable network)...
+  ... Passed --  time  1.0s #peers 3 #RPCs    40 #Ops    0
+--- PASS: TestLeaseFastGetReducesRPCs (1.93s)
+=== RUN   TestLeaseWaitsAfterTermSwitch
+Test: one client (5D lease term switch) (reliable network)...
+  ... Passed --  time  2.0s #peers 3 #RPCs    46 #Ops    0
+--- PASS: TestLeaseWaitsAfterTermSwitch (1.96s)
+=== RUN   TestTxnConditionalPut5D
+Test: one client (5D txn conditional) (reliable network)...
+  ... Passed --  time  0.9s #peers 3 #RPCs    45 #Ops    0
+--- PASS: TestTxnConditionalPut5D (0.85s)
+=== RUN   TestTxnMultiOps5D
+Test: one client (5D txn multi ops) (reliable network)...
+  ... Passed --  time  0.8s #peers 3 #RPCs    44 #Ops    0
+--- PASS: TestTxnMultiOps5D (0.77s)
+PASS
+ok      6.5840/kvraft1  220.454s
